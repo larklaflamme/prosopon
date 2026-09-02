@@ -25,6 +25,14 @@ live-tests = []
 name = "live_tts"
 required-features = ["live-tests"]
 
+[[test]]
+name = "live_cognition"
+required-features = ["live-tests"]
+
+[[test]]
+name = "live_pipeline"
+required-features = ["live-tests"]
+
 # Added in later slices:
 #   webrtc         (Slice 5 — transport)
 #   tracing        (logging)
