@@ -83,15 +83,18 @@ server/
     cognition.rs           # Ollama HTTP client (chat)
     pipeline.rs            # text → cognition → TTS → audio chunks
     webrtc.rs              # WebRTC server: data channel in, Ogg Opus bytes out
+    signaling.rs           # HTTP SDP offer/answer endpoint (Option B)
+    main.rs                # binary: config -> pipeline -> webrtc -> axum serve
   tests/
     live_tts.rs            # integration test vs real Kokoro (gated)
     live_cognition.rs      # integration test vs real Ollama (gated)
     pipeline.rs            # integration test vs both (gated)
 ```
 
-Dependencies: `tokio`, `serde`, `serde_yaml`, `reqwest` (HTTP), `webrtc`
-(webrtc-rs 0.21), `tracing` (logs). No Ogg demuxer needed (Option B ships
-Ogg Opus as-is over the data channel).
+Dependencies: `tokio`, `serde`, `serde_yaml`, `reqwest` (HTTP client),
+`axum` (HTTP signaling server), `webrtc` (webrtc-rs 0.20.4), `async-trait`,
+`bytes`. No Ogg demuxer needed (Option B ships Ogg Opus as-is over the data
+channel).
 
 ---
 
@@ -129,12 +132,42 @@ Each slice is independently testable and lands a working artifact.
 - **Test (live, gated):** "Say hello" → assert audio comes back, measure
   end-to-end latency (cognition + TTS, no transport).
 
-### Slice 5 — `webrtc.rs` (transport)
+### Slice 5 — `webrtc.rs` (transport) ✅ DONE (module + unit test)
 - WebRTC server: accepts one peer, exposes a data channel carrying text
   (client → server) and Ogg Opus bytes (server → client). No audio track.
 - Host-only / no-ICE mode (per 07 risk note — over SSH tunnel, no STUN).
 - **Test:** loopback — client sends text over data channel, server returns
-  Ogg Opus bytes. (Requires the tunnel up; Lark's step.)
+  Ogg Opus bytes. (Requires the tunnel up; Lark's step — NOT yet run.)
+
+**Version correction (2026-09-02):** the plan said "pin 0.21", but `webrtc`
+0.21 is only a release candidate (`0.21.0-rc.1`, published 2026-08-31). The
+stable release is **0.20.4**. We pinned `webrtc = "0.20.4"`.
+
+**API rewrite (2026-09-02):** the `webrtc` crate was completely rewritten
+since the 0.11-era API this project was originally planned against. The new
+0.20.x API is:
+- `PeerConnectionBuilder::new().with_configuration().with_handler().with_udp_addrs().build().await`
+  → returns `impl PeerConnection` (wrap in `Arc<dyn PeerConnection>`).
+- `PeerConnection` is a **trait**, not a struct.
+- `DataChannel` is a **trait** with `poll() -> Option<DataChannelEvent>`
+  (event polling, not callbacks), `send(BytesMut)`, `send_text(&str)`.
+- `PeerConnectionEventHandler` trait (async, all default no-op) with
+  `on_data_channel(Arc<dyn DataChannel>)`.
+- `RTCConfigurationBuilder::default().build()` for host-only ICE (no STUN).
+- Requires `async-trait` and `bytes` as direct deps.
+
+The module compiles and its unit test (`server_builds_from_default_config`)
+passes against 0.20.4. The full loopback test still needs the tunnel.
+
+**Signaling (Option B, 2026-09-02):** WebRTC needs an SDP offer/answer
+exchange before the data channel opens. Lark chose a tiny HTTP signaling
+endpoint over stdin/file signaling. `signaling.rs` exposes `POST /offer`:
+the client POSTs a JSON `RTCSessionDescription` (`{"type": "offer", "sdp":
+"..."}`), the server sets it as the remote description, creates the answer,
+and returns `{"type": "answer", "sdp": "..."}`. `RTCSessionDescription` is
+`Serialize`/`Deserialize` with `sdp_type` renamed to `type`, so the JSON
+round-trip is built in. M0 runs plain HTTP on localhost/tunnel; HTTPS is a
+later version. Config gains a `signaling.listen_port` (default 29435).
 
 ---
 
@@ -189,15 +222,19 @@ changes, no rebuild.
 
 - **Verified live this session:** Kokoro request schema + smoke test, Ollama
   `/api/chat` + `/api/generate` shapes, 26-model list, all via `curl`.
-- **From training, not verified:** the exact `webrtc-rs` 0.21 API surface
-  (data channel + host-only ICE mode). This gets verified when Slice 5 is
-  written and compiled. (`reqwest` HTTP + JSON is now verified — Slice 2
-  compiles and its live test passes against Kokoro.)
+- **Verified live this session (Slice 5):** the `webrtc` 0.20.4 API surface
+  (data channel + host-only ICE mode) — `webrtc.rs` compiles and its unit
+  test passes. The crate was rewritten since 0.11; the new API is
+  `PeerConnectionBuilder` + `PeerConnection`/`DataChannel` traits + `poll()`.
+  (`reqwest` HTTP + JSON is verified — Slice 2 compiles and its live test
+  passes against Kokoro.)
 
 ---
 
 ## 7. Open questions (none blocking)
 
+- **Signaling channel:** resolved by Option B — a tiny HTTP endpoint
+  (`POST /offer` → answer). HTTPS later.
 - **Streaming TTS vs whole-response:** resolved by Option B — the server
   forwards the Ogg Opus bytes as-is. M0 collects the full response; incremental
   forwarding (chunk-by-chunk over the data channel) is a later optimization.

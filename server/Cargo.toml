@@ -13,7 +13,11 @@ path = "src/lib.rs"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 reqwest = { version = "0.12", features = ["json"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+webrtc = "0.20.4"
+async-trait = "0.1"
+bytes = "1"
+axum = "0.8"
 
 [dev-dependencies]
 serde_json = "1"
@@ -32,7 +36,3 @@ required-features = ["live-tests"]
 [[test]]
 name = "live_pipeline"
 required-features = ["live-tests"]
-
-# Added in later slices:
-#   webrtc         (Slice 5 — transport)
-#   tracing        (logging)

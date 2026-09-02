@@ -1,28 +1,30 @@
 //! Prosopon server entry point.
 //!
-//! Slice 1: loads `config.yaml` and prints the resolved configuration.
-//! Later slices wire up the WebRTC server, cognition, and TTS pipeline.
+//! Loads `config.yaml`, builds the voice-loop pipeline and the WebRTC server,
+//! and serves the HTTP signaling endpoint (Option B). The client POSTs its SDP
+//! offer to `/offer`, receives the answer, and the data channel carries text
+//! (client → server) and Ogg Opus audio (server → client).
 
 use prosopon_server::config::Config;
+use prosopon_server::pipeline::Pipeline;
+use prosopon_server::signaling;
+use prosopon_server::webrtc::WebRtcServer;
+use std::sync::Arc;
 
-fn main() {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "config.yaml".to_string());
 
-    match Config::load(&path) {
-        Ok(cfg) => {
-            println!("loaded config from {path}:");
-            println!("  tts.base_url      = {}", cfg.tts.base_url);
-            println!("  tts.model         = {}", cfg.tts.model);
-            println!("  tts.voice         = {}", cfg.tts.voice);
-            println!("  cognition.base_url = {}", cfg.cognition.base_url);
-            println!("  cognition.model    = {}", cfg.cognition.model);
-            println!("  webrtc.listen_port = {}", cfg.webrtc.listen_port);
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            std::process::exit(1);
-        }
-    }
+    let config = Config::load(&path)?;
+    let pipeline = Arc::new(Pipeline::new(&config));
+    let server = Arc::new(WebRtcServer::new(&config.webrtc, pipeline).await?);
+
+    let app = signaling::router(server);
+    let addr = format!("0.0.0.0:{}", config.signaling.listen_port);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    println!("signaling listening on http://{addr}");
+    axum::serve(listener, app).await?;
+    Ok(())
 }

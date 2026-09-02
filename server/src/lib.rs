@@ -5,4 +5,6 @@
 pub mod cognition;
 pub mod config;
 pub mod pipeline;
+pub mod signaling;
 pub mod tts;
+pub mod webrtc;

@@ -11,4 +11,7 @@ cognition:
   model: "qwen2.5:3b"                  # fast-but-dumb default (M0); swap to qwen3:30b for smart tier
 
 webrtc:
-  listen_port: 29434                   # the port the client tunnels to
+  listen_port: 29434                   # the ICE port the client tunnels to
+
+signaling:
+  listen_port: 29435                   # the HTTP SDP offer/answer endpoint (Option B)

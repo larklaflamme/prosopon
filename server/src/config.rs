@@ -3,7 +3,7 @@
 //! Every field is optional in the YAML. Missing keys fall back to the
 //! `Default` impl for the containing struct, so a bare `{}` config is valid
 //! and yields the M0 defaults (Kokoro `af_heart`, Ollama `qwen2.5:3b`,
-//! WebRTC port 29434).
+//! WebRTC port 29434, signaling port 29435).
 
 use serde::Deserialize;
 use std::path::Path;
@@ -15,6 +15,7 @@ pub struct Config {
     pub tts: TtsConfig,
     pub cognition: CognitionConfig,
     pub webrtc: WebrtcConfig,
+    pub signaling: SignalingConfig,
 }
 
 impl Default for Config {
@@ -23,6 +24,7 @@ impl Default for Config {
             tts: TtsConfig::default(),
             cognition: CognitionConfig::default(),
             webrtc: WebrtcConfig::default(),
+            signaling: SignalingConfig::default(),
         }
     }
 }
@@ -73,6 +75,19 @@ pub struct WebrtcConfig {
 impl Default for WebrtcConfig {
     fn default() -> Self {
         Self { listen_port: 29434 }
+    }
+}
+
+/// HTTP signaling settings (Option B — the SDP offer/answer exchange).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SignalingConfig {
+    pub listen_port: u16,
+}
+
+impl Default for SignalingConfig {
+    fn default() -> Self {
+        Self { listen_port: 29435 }
     }
 }
 
@@ -131,6 +146,7 @@ mod tests {
         assert_eq!(cfg.tts.voice, "af_heart");
         assert_eq!(cfg.cognition.model, "qwen2.5:3b");
         assert_eq!(cfg.webrtc.listen_port, 29434);
+        assert_eq!(cfg.signaling.listen_port, 29435);
     }
 
     #[test]
@@ -143,14 +159,16 @@ mod tests {
         assert_eq!(cfg.tts.model, "kokoro");
         assert_eq!(cfg.cognition.model, "qwen2.5:3b");
         assert_eq!(cfg.webrtc.listen_port, 29434);
+        assert_eq!(cfg.signaling.listen_port, 29435);
     }
 
     #[test]
     fn missing_section_uses_section_default() {
         let cfg = Config::from_str("cognition:\n  model: qwen3:30b\n").expect("should parse");
-        // tts and webrtc sections are entirely absent -> full defaults.
+        // tts, webrtc, and signaling sections are entirely absent -> full defaults.
         assert_eq!(cfg.tts, TtsConfig::default());
         assert_eq!(cfg.webrtc, WebrtcConfig::default());
+        assert_eq!(cfg.signaling, SignalingConfig::default());
         // cognition model overridden.
         assert_eq!(cfg.cognition.model, "qwen3:30b");
         assert_eq!(cfg.cognition.base_url, "http://localhost:11434");
@@ -168,6 +186,8 @@ cognition:
   model: "qwen3:30b"
 webrtc:
   listen_port: 40000
+signaling:
+  listen_port: 40001
 "#;
         let cfg = Config::from_str(yaml).expect("full config should parse");
         assert_eq!(cfg.tts.base_url, "http://example:9999");
@@ -176,6 +196,7 @@ webrtc:
         assert_eq!(cfg.cognition.base_url, "http://example:8888");
         assert_eq!(cfg.cognition.model, "qwen3:30b");
         assert_eq!(cfg.webrtc.listen_port, 40000);
+        assert_eq!(cfg.signaling.listen_port, 40001);
     }
 
     #[test]
