@@ -3,9 +3,7 @@
 //! Slice 1: loads `config.yaml` and prints the resolved configuration.
 //! Later slices wire up the WebRTC server, cognition, and TTS pipeline.
 
-mod config;
-
-use config::Config;
+use prosopon_server::config::Config;
 
 fn main() {
     let path = std::env::args()

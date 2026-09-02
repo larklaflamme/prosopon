@@ -52,16 +52,17 @@ not from training.
 
 Three things I learned from the live checks that change how we build this:
 
-1. **Kokoro streams sentence-by-sentence by default** (`stream: true`).
-   This is *exactly* the M0 requirement ("streamed sentence-by-sentence").
-   The server should consume the streaming response and forward each
-   sentence's audio to the WebRTC track as it arrives — that's what hits the
+1. **Kokoro returns a single Ogg Opus stream** (`stream: true` gives HTTP
+   chunked delivery of one continuous Ogg stream, NOT per-sentence streams —
+   verified: 3 sentences → 1 `OpusHead`). The server consumes the response
+   and forwards the Ogg Opus bytes as they arrive — that's what hits the
    sub-second first-audio target.
 
-2. **Kokoro returns Opus directly** (`response_format: "opus"`). Opus is
-   WebRTC-native. So the server can request Opus from Kokoro and pipe it
-   straight into the WebRTC audio track with **no transcoding**. This is a
-   real simplification — no WAV→Opus step in the server.
+2. **Kokoro returns Ogg Opus** (`response_format: "opus"`). Under Option B
+   (Lark's decision, 2026-09-02 — see design/16), the server ships these Ogg
+   Opus bytes as-is over the WebRTC **data channel** with **no transcoding and
+   no demuxing**. The client plays the Ogg Opus natively. This is a real
+   simplification — no WAV→Opus step, no Ogg demuxer, no audio track.
 
 3. **Ollama `/api/chat` is the right endpoint**, not `/api/generate`. Chat
    carries the conversation history (`messages` array), which is what a
@@ -81,7 +82,7 @@ server/
     tts.rs                 # Kokoro HTTP client (streaming)
     cognition.rs           # Ollama HTTP client (chat)
     pipeline.rs            # text → cognition → TTS → audio chunks
-    webrtc.rs              # WebRTC server: data channel in, audio track out
+    webrtc.rs              # WebRTC server: data channel in, Ogg Opus bytes out
   tests/
     live_tts.rs            # integration test vs real Kokoro (gated)
     live_cognition.rs      # integration test vs real Ollama (gated)
@@ -89,7 +90,8 @@ server/
 ```
 
 Dependencies: `tokio`, `serde`, `serde_yaml`, `reqwest` (HTTP), `webrtc`
-(webrtc-rs 0.21), `tracing` (logs).
+(webrtc-rs 0.21), `tracing` (logs). No Ogg demuxer needed (Option B ships
+Ogg Opus as-is over the data channel).
 
 ---
 
@@ -105,12 +107,13 @@ Each slice is independently testable and lands a working artifact.
 - **Test:** unit test parses a sample `config.yaml`, asserts defaults apply
   when keys are absent, asserts overrides apply when present.
 
-### Slice 2 — `tts.rs` (live Kokoro)
-- `TtsClient::synthesize(text) -> impl Stream<Item = AudioChunk>`.
+### Slice 2 — `tts.rs` (live Kokoro) ✅ DONE
+- `TtsClient::synthesize(text) -> Result<Vec<u8>, TtsError>` — returns the
+  full Ogg Opus stream (Option B: no demux, no transcoding).
 - POSTs to `/v1/audio/speech` with `stream: true`, `response_format: "opus"`.
-- Parses the streaming response into sentence-sized audio chunks.
-- **Test (live, gated):** synthesize a fixed sentence, assert non-empty
-  audio, assert Opus magic bytes, measure time-to-first-chunk.
+- **Test (unit, no infra):** request serializes to the expected JSON shape.
+- **Test (live, gated):** synthesize a fixed sentence, assert non-empty,
+  assert `OggS` magic bytes + `OpusHead` present. **Passes live.**
 
 ### Slice 3 — `cognition.rs` (live Ollama)
 - `CognitionClient::chat(history: &[Message]) -> String`.
@@ -127,11 +130,11 @@ Each slice is independently testable and lands a working artifact.
   end-to-end latency (cognition + TTS, no transport).
 
 ### Slice 5 — `webrtc.rs` (transport)
-- WebRTC server: accepts one peer, exposes a data channel (text in) and an
-  audio track (Opus out).
+- WebRTC server: accepts one peer, exposes a data channel carrying text
+  (client → server) and Ogg Opus bytes (server → client). No audio track.
 - Host-only / no-ICE mode (per 07 risk note — over SSH tunnel, no STUN).
-- **Test:** loopback — client sends text over data channel, server echoes
-  audio back. (Requires the tunnel up; Lark's step.)
+- **Test:** loopback — client sends text over data channel, server returns
+  Ogg Opus bytes. (Requires the tunnel up; Lark's step.)
 
 ---
 
@@ -187,16 +190,16 @@ changes, no rebuild.
 - **Verified live this session:** Kokoro request schema + smoke test, Ollama
   `/api/chat` + `/api/generate` shapes, 26-model list, all via `curl`.
 - **From training, not verified:** the exact `webrtc-rs` 0.21 API surface
-  (data channel + audio track + host-only ICE mode), and `reqwest` streaming
-  response handling. These get verified when Slice 2 and Slice 5 are written
-  and compiled.
+  (data channel + host-only ICE mode). This gets verified when Slice 5 is
+  written and compiled. (`reqwest` HTTP + JSON is now verified — Slice 2
+  compiles and its live test passes against Kokoro.)
 
 ---
 
 ## 7. Open questions (none blocking)
 
-- **Streaming TTS vs whole-response:** Slice 2 assumes streaming (sentence
-  chunks). If streaming proves fiddly, fall back to `stream: false` + whole
-  Opus blob — still correct, just loses the sentence-level pipelining.
+- **Streaming TTS vs whole-response:** resolved by Option B — the server
+  forwards the Ogg Opus bytes as-is. M0 collects the full response; incremental
+  forwarding (chunk-by-chunk over the data channel) is a later optimization.
 - **Cognition streaming:** M0 uses `stream: false` (simplest). Streaming
   cognition (token-by-token) is a later optimization, not M0.
