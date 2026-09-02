@@ -1,0 +1,32 @@
+[package]
+name = "prosopon-client-core"
+version = "0.1.0"
+description = "Prosopon client core — WebRTC transport, signaling, audio playback, STT, wake word"
+authors = ["Skye Laflamme <skye@ravennest.science>"]
+edition = "2021"
+
+[lib]
+name = "prosopon_client_core"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }
+webrtc = "0.20.4"
+async-trait = "0.1"
+bytes = "1"
+thiserror = "1"
+
+[dev-dependencies]
+prosopon-server = { path = "../server" }
+serde_json = "1"
+axum = "0.8"
+
+[features]
+live-tests = []
+
+[[test]]
+name = "loopback"
+required-features = ["live-tests"]

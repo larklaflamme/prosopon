@@ -1,32 +1,41 @@
 //! HTTP signaling endpoint (Option B — Lark's decision, 2026-09-02).
 //!
-//! WebRTC requires an SDP offer/answer exchange before the data channel opens.
-//! This module exposes a tiny HTTP endpoint that receives the client's offer
-//! and returns the server's answer.
-//!
-//! The client POSTs a JSON `RTCSessionDescription`:
-//!
-//! ```json
-//! { "type": "offer", "sdp": "v=0\r\n..." }
-//! ```
-//!
-//! and receives the answer in the same shape:
+//! WebRTC requires an SDP offer/answer exchange *and* an ICE candidate
+//! exchange before the data channel opens. Because the `webrtc` crate uses
+//! trickle ICE (candidates are gathered asynchronously, not embedded in the
+//! SDP), this endpoint carries both in a single round-trip:
 //!
 //! ```json
-//! { "type": "answer", "sdp": "v=0\r\n..." }
+//! {
+//!   "type": "offer",
+//!   "sdp": "v=0\r\n...",
+//!   "candidates": [
+//!     { "candidate": "candidate:...", "sdpMid": "", "sdpMLineIndex": 0 }
+//!   ]
+//! }
 //! ```
 //!
-//! M0 runs this over plain HTTP on localhost (or an SSH tunnel); HTTPS is a
-//! later version (Lark: "we will switch to HTTPS later").
+//! and returns the answer in the same shape. M0 runs this over plain HTTP on
+//! localhost (or an SSH tunnel); HTTPS is a later version.
 
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use webrtc::peer_connection::RTCSessionDescription;
+use webrtc::peer_connection::{RTCIceCandidateInit, RTCSessionDescription};
 
 use crate::webrtc::WebRtcServer;
+
+/// The signaling wire message: an SDP description plus the trickled ICE
+/// candidates gathered alongside it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalingMessage {
+    #[serde(flatten)]
+    pub description: RTCSessionDescription,
+    pub candidates: Vec<RTCIceCandidateInit>,
+}
 
 /// Shared state for the signaling endpoint: the WebRTC server that answers
 /// offers.
@@ -41,15 +50,15 @@ pub fn router(server: Arc<WebRtcServer>) -> Router {
         .with_state(Arc::new(SignalingState { server }))
 }
 
-/// Handle an offer: set it as the remote description, create the answer, and
-/// return it to the client.
+/// Handle an offer: set it as the remote description, add the client's
+/// candidates, create the answer, and return it with the server's candidates.
 async fn handle_offer(
     State(state): State<Arc<SignalingState>>,
-    Json(offer): Json<RTCSessionDescription>,
-) -> Result<Json<RTCSessionDescription>, (StatusCode, String)> {
+    Json(msg): Json<SignalingMessage>,
+) -> Result<Json<SignalingMessage>, (StatusCode, String)> {
     state
         .server
-        .answer(offer)
+        .answer(msg.description, msg.candidates)
         .await
         .map(Json)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
@@ -73,7 +82,19 @@ mod tests {
                 .await
                 .expect("server should build with host-only ICE"),
         );
-        // The router builds and holds the server in shared state.
         let _app = router(server);
+    }
+
+    #[test]
+    fn signaling_message_round_trips() {
+        // The wire shape must round-trip: {"type":"offer","sdp":"...","candidates":[...]}.
+        let json = r#"{"type":"offer","sdp":"v=0\r\n","candidates":[{"candidate":"candidate:abc","sdpMid":"","sdpMLineIndex":0}]}"#;
+        let msg: SignalingMessage = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(msg.description.sdp, "v=0\r\n");
+        assert_eq!(msg.candidates.len(), 1);
+        assert_eq!(msg.candidates[0].candidate, "candidate:abc");
+        let back = serde_json::to_value(&msg).expect("serialize");
+        assert_eq!(back["type"], "offer");
+        assert_eq!(back["candidates"][0]["candidate"], "candidate:abc");
     }
 }
