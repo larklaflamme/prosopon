@@ -89,12 +89,23 @@ the candidate exchange works, and the chunked audio round-trips losslessly.
 4. **Wake word (openWakeWord)** — Python sidecar, "Hey Skye".
 5. **Mic capture** — cpal, macOS.
 
-## Open architectural question (flagged, not blocking)
+## Network reachability — resolved 2026-09-02 (STUN + firewall)
 
-The design docs (04, 13) describe an **SSH tunnel** (`ssh -L 29434:...`) for
-the WebRTC port. But SSH tunnels forward **TCP**, while WebRTC ICE uses
-**UDP**. The signaling (HTTP/TCP) can be tunneled, but the data channel
-(SCTP over DTLS over UDP) cannot. This needs a decision before the real
-deployment: direct UDP exposure (with a firewall rule), a UDP-capable tunnel
-(e.g. WireGuard), or a TURN relay. Not blocking the loopback test, but it
-blocks the Mac ↔ server test.
+The design docs (04, 13) originally described an **SSH tunnel**
+(`ssh -L 29434:...`) for the WebRTC port. That was wrong: SSH tunnels forward
+**TCP**, while WebRTC's data channel is SCTP-over-DTLS-over-**UDP**.
+
+**Resolution:** STUN for candidate discovery + a firewall rule for UDP
+reachability.
+
+- **STUN** (configured, default Google `stun:stun.l.google.com:19302`) lets
+  both peers discover their public server-reflexive candidates. Wired into
+  `webrtc.stun_servers` on both server and client.
+- **Firewall:** open UDP `29434` (ICE/data channel) and TCP `29435`
+  (signaling) on the server. STUN discovers the mapping but does not relay
+  media.
+- **Symmetric-NAT caveat:** STUN works for cone NAT (most home/office
+  networks). Symmetric NAT would need a TURN relay — deferred, M0 assumes
+  cone NAT.
+
+See `13-install-guide.md` §B10 for the concrete steps.

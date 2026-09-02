@@ -39,7 +39,8 @@ use std::time::Duration;
 use webrtc::data_channel::{DataChannel, DataChannelEvent};
 use webrtc::peer_connection::{
     PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
-    RTCIceCandidateInit, RTCIceGatheringState, RTCPeerConnectionIceEvent, RTCSessionDescription,
+    RTCIceCandidateInit, RTCIceGatheringState, RTCIceServer, RTCPeerConnectionIceEvent,
+    RTCSessionDescription,
 };
 
 /// Maximum size of a single audio chunk sent over the data channel.
@@ -132,8 +133,8 @@ pub struct WebRtcServer {
 
 impl WebRtcServer {
     /// Build the server: a peer connection bound to `0.0.0.0:{listen_port}`
-    /// with host-only ICE (no STUN/TURN — the plan's no-ICE mode, intended to
-    /// run over an SSH tunnel).
+    /// with the configured STUN servers for ICE candidate gathering (host-only
+    /// candidates are not reachable across NAT).
     pub async fn new(
         config: &WebrtcConfig,
         pipeline: Arc<Pipeline>,
@@ -143,7 +144,17 @@ impl WebRtcServer {
             pipeline,
             ice: ice.clone(),
         });
-        let rtc_config = RTCConfigurationBuilder::default().build();
+        let ice_servers = config
+            .stun_servers
+            .iter()
+            .map(|url| RTCIceServer {
+                urls: vec![url.clone()],
+                ..Default::default()
+            })
+            .collect();
+        let rtc_config = RTCConfigurationBuilder::default()
+            .with_ice_servers(ice_servers)
+            .build();
         let pc = PeerConnectionBuilder::new()
             .with_configuration(rtc_config)
             .with_handler(handler)

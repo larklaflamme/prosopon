@@ -9,6 +9,7 @@
 //! Gated behind `--features live-tests` because it needs Kokoro (localhost
 //! 21802) and Ollama (localhost 11434) running.
 
+use prosopon_client_core::config::ClientConfig;
 use prosopon_client_core::webrtc_client::WebRtcClient;
 use prosopon_server::config::Config;
 use prosopon_server::pipeline::Pipeline;
@@ -28,7 +29,7 @@ async fn full_loop_text_to_audio_over_webrtc() {
             .expect("server should build"),
     );
 
-    let app = signaling::router(server);
+    let app = signaling::router(server, String::new());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind signaling listener");
@@ -39,7 +40,14 @@ async fn full_loop_text_to_audio_over_webrtc() {
     let signaling_url = format!("http://{signaling_addr}/offer");
 
     // --- Client side: connect, send text, receive reassembled audio. ---
-    let client = WebRtcClient::connect(&signaling_url)
+    let client_config = ClientConfig {
+        signaling: prosopon_client_core::config::SignalingConfig {
+            url: signaling_url,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let client = WebRtcClient::connect(&client_config)
         .await
         .expect("client should connect");
 

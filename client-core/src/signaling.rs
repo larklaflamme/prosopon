@@ -23,14 +23,17 @@ pub struct SignalingMessage {
 /// HTTP client for the SDP + ICE candidate exchange.
 pub struct SignalingClient {
     url: String,
+    auth_token: String,
     http: reqwest::Client,
 }
 
 impl SignalingClient {
-    /// Build a signaling client targeting `url` (the server's `/offer`).
-    pub fn new(url: &str) -> Self {
+    /// Build a signaling client targeting `url` (the server's `/offer`),
+    /// presenting `auth_token` as `Authorization: Bearer <token>`.
+    pub fn new(url: &str, auth_token: &str) -> Self {
         Self {
             url: url.to_string(),
+            auth_token: auth_token.to_string(),
             http: reqwest::Client::new(),
         }
     }
@@ -41,13 +44,14 @@ impl SignalingClient {
         &self,
         msg: SignalingMessage,
     ) -> Result<SignalingMessage, ClientError> {
-        let resp = self
-            .http
-            .post(&self.url)
-            .json(&msg)
-            .send()
-            .await?
-            .error_for_status()?;
+        let mut req = self.http.post(&self.url).json(&msg);
+        if !self.auth_token.is_empty() {
+            req = req.header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {}", self.auth_token),
+            );
+        }
+        let resp = req.send().await?.error_for_status()?;
         let answer: SignalingMessage = resp.json().await?;
         Ok(answer)
     }

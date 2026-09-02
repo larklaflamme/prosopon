@@ -24,9 +24,10 @@ use std::time::Duration;
 use webrtc::data_channel::{DataChannel, DataChannelEvent};
 use webrtc::peer_connection::{
     PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
-    RTCIceCandidateInit, RTCIceGatheringState, RTCPeerConnectionIceEvent,
+    RTCIceCandidateInit, RTCIceGatheringState, RTCIceServer, RTCPeerConnectionIceEvent,
 };
 
+use crate::config::ClientConfig;
 use crate::signaling::{SignalingClient, SignalingMessage};
 use crate::ClientError;
 
@@ -76,12 +77,23 @@ pub struct WebRtcClient {
 impl WebRtcClient {
     /// Connect to the server: build the peer connection, create the data
     /// channel, perform the offer/answer + candidate exchange over
-    /// `signaling_url`, and wait for the data channel to open.
-    pub async fn connect(signaling_url: &str) -> Result<Self, ClientError> {
+    /// `config.signaling.url`, and wait for the data channel to open.
+    pub async fn connect(config: &ClientConfig) -> Result<Self, ClientError> {
         let ice = Arc::new(IceState::default());
         let handler = Arc::new(Handler { ice: ice.clone() });
 
-        let rtc_config = RTCConfigurationBuilder::default().build();
+        let ice_servers = config
+            .webrtc
+            .stun_servers
+            .iter()
+            .map(|url| RTCIceServer {
+                urls: vec![url.clone()],
+                ..Default::default()
+            })
+            .collect();
+        let rtc_config = RTCConfigurationBuilder::default()
+            .with_ice_servers(ice_servers)
+            .build();
         let pc = PeerConnectionBuilder::new()
             .with_configuration(rtc_config)
             .with_handler(handler)
@@ -102,7 +114,8 @@ impl WebRtcClient {
         let candidates = ice.candidates.lock().unwrap().clone();
 
         // Exchange the offer + candidates for the answer + candidates.
-        let signaling = SignalingClient::new(signaling_url);
+        let signaling =
+            SignalingClient::new(&config.signaling.url, &config.signaling.auth_token);
         let answer = signaling
             .offer(SignalingMessage {
                 description: offer,

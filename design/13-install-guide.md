@@ -114,7 +114,7 @@ cognition:
   base_url: "http://localhost:11434"
   model: "qwen2.5:3b"     # fast-but-dumb default (M0); configurable via config.yaml
 webrtc:
-  listen_port: 29434       # the port the client tunnels to
+  listen_port: 29434       # the UDP ICE port the client connects to
 ```
 
 ### A4. Build & run
@@ -200,17 +200,64 @@ cargo tauri dev        # first run compiles; needs the icons (see B9)
 cargo tauri icon path/to/icon.png
 ```
 
-### B10. SSH tunnel to the server
+### B10. Network reachability (STUN + firewall) — revised 2026-09-02
 
 The client reaches the server's WebRTC port only — Kokoro and Ollama are
 contacted by the *server* on its own localhost, not by the client.
 
-```bash
-ssh -L 29434:localhost:29434 user@server
-```
+**The earlier SSH-tunnel guidance was wrong and is removed.** SSH tunnels
+forward TCP, but WebRTC's data channel is SCTP-over-DTLS-over-**UDP** — an
+SSH tunnel cannot carry it. The correct approach is:
 
-This forwards the Rust server's WebRTC port to the client's localhost. The
-client connects to `localhost:29434` via WebRTC.
+1. **STUN for candidate discovery** (configured, default Google STUN). Both
+   peers query a public STUN server to learn their public (server-reflexive)
+   IP:port mapping. This is already wired into `config.yaml` under
+   `webrtc.stun_servers` on both sides.
+
+2. **Open the UDP ICE port on the server firewall.** STUN only *discovers*
+   the mapping; it does not relay media. The server's UDP port `29434` must
+   be reachable from the internet for the data channel to flow. Example
+   (ufw):
+
+   ```bash
+   sudo ufw allow 29434/udp   # WebRTC ICE / data channel
+   sudo ufw allow 29435/tcp   # HTTP signaling (offer/answer)
+   ```
+
+3. **Symmetric-NAT caveat.** STUN (server-reflexive candidates) works for
+   cone NAT, which covers most home/office networks. If the client sits
+   behind a *symmetric* NAT, STUN alone is insufficient and a TURN relay is
+   required. M0 assumes cone NAT; TURN is a later addition if needed.
+
+4. **Set a non-empty `signaling.auth_token` before exposing the server.**
+   With the ports open to the internet, the shared-secret token is the gate:
+   the client presents `Authorization: Bearer <token>` on `POST /offer`, and
+   the server rejects anything else with an empty 401. The server prints a
+   startup warning if the token is empty. The data channel (UDP 29434) needs
+   no separate rule — its DTLS handshake verifies certificate fingerprints
+   exchanged over the authenticated signaling channel, so an unauthenticated
+   peer can never open it.
+
+   ```yaml
+   signaling:
+     listen_port: 29435
+     auth_token: "replace-with-a-long-random-secret"
+     tls:
+       cert: "/etc/letsencrypt/live/<domain>/fullchain.pem"
+       key:  "/etc/letsencrypt/live/<domain>/privkey.pem"
+   ```
+
+   **HTTPS (recommended for direct connection).** The signaling endpoint
+   supports TLS: set `signaling.tls.cert` and `signaling.tls.key` to the
+   certificate chain and private key paths, and the server serves HTTPS
+   instead of plain HTTP. The client then points `signaling.url` at
+   `https://<domain>:29435/offer`. With HTTPS, the auth token is encrypted in
+   transit, closing the cleartext-eavesdropping gap for clients on untrusted
+   networks (coffee-shop Wi-Fi). Leave both paths empty for plain-HTTP
+   localhost dev.
+
+The client connects to the server's public IP over UDP 29434 (data channel)
+and TCP 29435 (signaling).
 
 ---
 

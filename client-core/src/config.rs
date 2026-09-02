@@ -1,8 +1,9 @@
 //! Client configuration: `config.yaml` loader with defaults.
 //!
 //! The client is the *initiating* peer, so it needs no fixed WebRTC port —
-//! it binds an ephemeral UDP socket. The only thing it must know is where to
-//! POST its SDP offer (the server's HTTP signaling endpoint).
+//! it binds an ephemeral UDP socket. It must know where to POST its SDP offer
+//! (the server's HTTP signaling endpoint) and which STUN servers to use for
+//! ICE candidate gathering.
 
 use serde::Deserialize;
 use std::path::Path;
@@ -12,12 +13,14 @@ use std::path::Path;
 #[serde(default)]
 pub struct ClientConfig {
     pub signaling: SignalingConfig,
+    pub webrtc: WebrtcConfig,
 }
 
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             signaling: SignalingConfig::default(),
+            webrtc: WebrtcConfig::default(),
         }
     }
 }
@@ -28,12 +31,35 @@ impl Default for ClientConfig {
 pub struct SignalingConfig {
     /// The HTTP endpoint the client POSTs its SDP offer to.
     pub url: String,
+    /// Shared secret presented to the server as `Authorization: Bearer
+    /// <token>`. Empty = no auth (localhost dev).
+    pub auth_token: String,
 }
 
 impl Default for SignalingConfig {
     fn default() -> Self {
         Self {
             url: "http://localhost:29435/offer".into(),
+            auth_token: String::new(),
+        }
+    }
+}
+
+/// WebRTC transport settings.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct WebrtcConfig {
+    /// STUN servers used for ICE candidate gathering. Host-only candidates
+    /// are not reachable across NAT, so a public STUN server is required for
+    /// the client to reach the server over the internet (server-reflexive
+    /// candidates). Defaults to Google's public STUN.
+    pub stun_servers: Vec<String>,
+}
+
+impl Default for WebrtcConfig {
+    fn default() -> Self {
+        Self {
+            stun_servers: vec!["stun:stun.l.google.com:19302".into()],
         }
     }
 }
@@ -91,12 +117,30 @@ mod tests {
         let cfg = ClientConfig::from_str("{}").expect("empty config should parse");
         assert_eq!(cfg, ClientConfig::default());
         assert_eq!(cfg.signaling.url, "http://localhost:29435/offer");
+        assert_eq!(cfg.webrtc.stun_servers, vec!["stun:stun.l.google.com:19302"]);
     }
 
     #[test]
     fn partial_override_applies_defaults_for_missing_keys() {
-        let cfg = ClientConfig::from_str("signaling:\n  url: \"http://example:9999/offer\"\n")
+        let cfg = ClientConfig::from_str("signaling:\n  url: http://example:29435/offer\n")
             .expect("partial config should parse");
-        assert_eq!(cfg.signaling.url, "http://example:9999/offer");
+        assert_eq!(cfg.signaling.url, "http://example:29435/offer");
+        assert_eq!(cfg.webrtc.stun_servers, vec!["stun:stun.l.google.com:19302"]);
+    }
+
+    #[test]
+    fn full_override_applies_every_value() {
+        let yaml = r#"
+signaling:
+  url: "http://example:29435/offer"
+  auth_token: "hunter2"
+webrtc:
+  stun_servers:
+    - "stun:stun.nvidia.com:3478"
+"#;
+        let cfg = ClientConfig::from_str(yaml).expect("full config should parse");
+        assert_eq!(cfg.signaling.url, "http://example:29435/offer");
+        assert_eq!(cfg.signaling.auth_token, "hunter2");
+        assert_eq!(cfg.webrtc.stun_servers, vec!["stun:stun.nvidia.com:3478"]);
     }
 }

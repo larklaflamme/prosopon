@@ -3,7 +3,7 @@
 //! Every field is optional in the YAML. Missing keys fall back to the
 //! `Default` impl for the containing struct, so a bare `{}` config is valid
 //! and yields the M0 defaults (Kokoro `af_heart`, Ollama `qwen2.5:3b`,
-//! WebRTC port 29434, signaling port 29435).
+//! WebRTC port 29434, signaling port 29435, Google STUN).
 
 use serde::Deserialize;
 use std::path::Path;
@@ -70,11 +70,19 @@ impl Default for CognitionConfig {
 #[serde(default)]
 pub struct WebrtcConfig {
     pub listen_port: u16,
+    /// STUN servers used for ICE candidate gathering. Host-only candidates
+    /// are not reachable across NAT, so a public STUN server is required for
+    /// the Mac client to reach the server over the internet (server-reflexive
+    /// candidates). Defaults to Google's public STUN.
+    pub stun_servers: Vec<String>,
 }
 
 impl Default for WebrtcConfig {
     fn default() -> Self {
-        Self { listen_port: 29434 }
+        Self {
+            listen_port: 29434,
+            stun_servers: vec!["stun:stun.l.google.com:19302".into()],
+        }
     }
 }
 
@@ -83,11 +91,49 @@ impl Default for WebrtcConfig {
 #[serde(default)]
 pub struct SignalingConfig {
     pub listen_port: u16,
+    /// Shared secret the client must present (as `Authorization: Bearer
+    /// <token>`) to use the signaling endpoint. Empty = auth disabled
+    /// (localhost dev). Set a non-empty value before exposing the server.
+    pub auth_token: String,
+    /// TLS settings for serving the signaling endpoint over HTTPS. When both
+    /// `cert` and `key` are non-empty, the server serves HTTPS; otherwise it
+    /// serves plain HTTP (localhost dev).
+    pub tls: TlsConfig,
 }
 
 impl Default for SignalingConfig {
     fn default() -> Self {
-        Self { listen_port: 29435 }
+        Self {
+            listen_port: 29435,
+            auth_token: String::new(),
+            tls: TlsConfig::default(),
+        }
+    }
+}
+
+/// TLS certificate/key paths for the signaling endpoint.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct TlsConfig {
+    /// Path to the certificate chain (PEM), e.g. `fullchain.pem`.
+    pub cert: String,
+    /// Path to the private key (PEM), e.g. `privkey.pem`.
+    pub key: String,
+}
+
+impl Default for TlsConfig {
+    fn default() -> Self {
+        Self {
+            cert: String::new(),
+            key: String::new(),
+        }
+    }
+}
+
+impl TlsConfig {
+    /// True when both cert and key paths are set (HTTPS mode).
+    pub fn enabled(&self) -> bool {
+        !self.cert.is_empty() && !self.key.is_empty()
     }
 }
 
@@ -146,6 +192,7 @@ mod tests {
         assert_eq!(cfg.tts.voice, "af_heart");
         assert_eq!(cfg.cognition.model, "qwen2.5:3b");
         assert_eq!(cfg.webrtc.listen_port, 29434);
+        assert_eq!(cfg.webrtc.stun_servers, vec!["stun:stun.l.google.com:19302"]);
         assert_eq!(cfg.signaling.listen_port, 29435);
     }
 
@@ -159,6 +206,7 @@ mod tests {
         assert_eq!(cfg.tts.model, "kokoro");
         assert_eq!(cfg.cognition.model, "qwen2.5:3b");
         assert_eq!(cfg.webrtc.listen_port, 29434);
+        assert_eq!(cfg.webrtc.stun_servers, vec!["stun:stun.l.google.com:19302"]);
         assert_eq!(cfg.signaling.listen_port, 29435);
     }
 
@@ -186,6 +234,8 @@ cognition:
   model: "qwen3:30b"
 webrtc:
   listen_port: 40000
+  stun_servers:
+    - "stun:stun.nvidia.com:3478"
 signaling:
   listen_port: 40001
 "#;
@@ -196,6 +246,7 @@ signaling:
         assert_eq!(cfg.cognition.base_url, "http://example:8888");
         assert_eq!(cfg.cognition.model, "qwen3:30b");
         assert_eq!(cfg.webrtc.listen_port, 40000);
+        assert_eq!(cfg.webrtc.stun_servers, vec!["stun:stun.nvidia.com:3478"]);
         assert_eq!(cfg.signaling.listen_port, 40001);
     }
 

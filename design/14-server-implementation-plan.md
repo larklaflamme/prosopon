@@ -154,6 +154,11 @@ since the 0.11-era API this project was originally planned against. The new
 - `PeerConnectionEventHandler` trait (async, all default no-op) with
   `on_data_channel(Arc<dyn DataChannel>)`.
 - `RTCConfigurationBuilder::default().build()` for host-only ICE (no STUN).
+  **Superseded 2026-09-02:** STUN added — `with_ice_servers(vec![RTCIceServer {
+  urls: vec!["stun:stun.l.google.com:19302".into()], ..Default::default() }])`,
+  driven by `webrtc.stun_servers` in config. Host-only candidates are not
+  reachable across NAT, so a public STUN server is required for the Mac
+  client to reach the server over the internet.
 - Requires `async-trait` and `bytes` as direct deps.
 
 The module compiles and its unit test (`server_builds_from_default_config`)
@@ -240,3 +245,38 @@ changes, no rebuild.
   forwarding (chunk-by-chunk over the data channel) is a later optimization.
 - **Cognition streaming:** M0 uses `stream: false` (simplest). Streaming
   cognition (token-by-token) is a later optimization, not M0.
+
+---
+
+## 8. Security model (2026-09-02)
+
+Lark's requirement: if someone who is *not* the client connects to the exposed
+ports, the connection should drop with no response.
+
+Two layers, two different answers:
+
+1. **Signaling (TCP 29435) — shared-secret auth.** The client presents
+   `Authorization: Bearer <token>`; the server checks it in constant time and
+   returns an empty 401 on failure. `signaling.auth_token` in `config.yaml`
+   (empty = auth disabled, for localhost dev). The server prints a startup
+   warning if the token is empty. **Caveat:** M0 is plain HTTP, so the token
+   travels in cleartext — it stops *unauthenticated* access, not a network
+   eavesdropper. HTTPS (already planned) closes that gap.
+
+2. **Data channel (UDP 29434) — already protected by DTLS.** The DTLS
+   certificate fingerprints are exchanged over the *authenticated* signaling
+   channel, so an intruder who can't authenticate to signaling can't complete
+   the DTLS handshake. No extra work needed for M0.
+
+**Honest limits of "no response whatsoever":**
+
+- The kernel SYN-ACKs TCP 29435 before the app sees the connection, so a port
+  scanner still sees the port is open. True packet-level silence needs a
+  firewall rule (iptables/ufw DROP) keyed to the client's IP — which conflicts
+  with a dynamic client IP.
+- ICE will still answer STUN binding requests on UDP 29434 (that's how ICE
+  works). It reveals the port is open but leaks no data.
+
+**Deployment checklist (before exposing):** set a non-empty `auth_token`, open
+UDP 29434 + TCP 29435 in the firewall, and (optionally) add an IP allowlist for
+true silence.

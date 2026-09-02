@@ -53,8 +53,16 @@ async fn connect_webrtc(
     app: AppHandle,
     state: State<'_, AppState>,
     signaling_url: String,
+    auth_token: String,
 ) -> Result<(), String> {
-    let client = WebRtcClient::connect(&signaling_url)
+    let config = prosopon_client_core::config::ClientConfig {
+        signaling: prosopon_client_core::config::SignalingConfig {
+            url: signaling_url,
+            auth_token,
+        },
+        ..Default::default()
+    };
+    let client = WebRtcClient::connect(&config)
         .await
         .map_err(|e| e.to_string())?;
     *state.webrtc.lock().unwrap() = Some(Arc::new(client));

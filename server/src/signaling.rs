@@ -19,7 +19,7 @@
 //! localhost (or an SSH tunnel); HTTPS is a later version.
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -41,21 +41,62 @@ pub struct SignalingMessage {
 /// offers.
 pub struct SignalingState {
     server: Arc<WebRtcServer>,
+    auth_token: String,
 }
 
 /// Build the signaling router: `POST /offer` → answer.
-pub fn router(server: Arc<WebRtcServer>) -> Router {
+pub fn router(server: Arc<WebRtcServer>, auth_token: String) -> Router {
     Router::new()
         .route("/offer", post(handle_offer))
-        .with_state(Arc::new(SignalingState { server }))
+        .with_state(Arc::new(SignalingState { server, auth_token }))
+}
+
+/// Check the request's `Authorization: Bearer <token>` header against the
+/// configured shared secret, in constant time. Empty token = auth disabled
+/// (localhost dev).
+fn authorized(auth_token: &str, headers: &HeaderMap) -> bool {
+    if auth_token.is_empty() {
+        return true;
+    }
+    let expected = format!("Bearer {}", auth_token);
+    match headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+        Some(provided) => constant_time_eq(provided.as_bytes(), expected.as_bytes()),
+        None => false,
+    }
+}
+
+/// Constant-time byte comparison (length check first, then XOR-accumulate).
+/// Prevents a timing side-channel on the token check. The `subtle` crate is
+/// the production-grade equivalent; this is dependency-free for M0.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Handle an offer: set it as the remote description, add the client's
 /// candidates, create the answer, and return it with the server's candidates.
+///
+/// Auth is checked *before* the body is parsed, so an unauthenticated request
+/// gets an empty 401 regardless of whether its body is valid JSON. (If we let
+/// axum's `Json` extractor run first, a malformed body would return a 422 with
+/// an error body, leaking the endpoint's existence and expected shape.)
 async fn handle_offer(
     State(state): State<Arc<SignalingState>>,
-    Json(msg): Json<SignalingMessage>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
 ) -> Result<Json<SignalingMessage>, (StatusCode, String)> {
+    if !authorized(&state.auth_token, &headers) {
+        // Unauthenticated: drop silently — no body, no useful information.
+        return Err((StatusCode::UNAUTHORIZED, String::new()));
+    }
+    let msg: SignalingMessage = serde_json::from_slice(&body)
+        .map_err(|_| (StatusCode::BAD_REQUEST, String::new()))?;
     state
         .server
         .answer(msg.description, msg.candidates)
@@ -82,7 +123,30 @@ mod tests {
                 .await
                 .expect("server should build with host-only ICE"),
         );
-        let _app = router(server);
+        let _app = router(server, String::new());
+    }
+
+    #[test]
+    fn constant_time_eq_matches_and_rejects() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secre"));
+        assert!(!constant_time_eq(b"secret", b"secreX"));
+        assert!(!constant_time_eq(b"", b"x"));
+    }
+
+    #[test]
+    fn authorized_checks_bearer_token() {
+        let mut headers = HeaderMap::new();
+        // Empty token = auth disabled.
+        assert!(authorized("", &headers));
+        // Token set, no header = rejected.
+        assert!(!authorized("secret", &headers));
+        // Correct token = accepted.
+        headers.insert(AUTHORIZATION, "Bearer secret".parse().unwrap());
+        assert!(authorized("secret", &headers));
+        // Wrong token = rejected.
+        headers.insert(AUTHORIZATION, "Bearer wrong".parse().unwrap());
+        assert!(!authorized("secret", &headers));
     }
 
     #[test]

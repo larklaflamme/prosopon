@@ -12,6 +12,12 @@ cognition:
 
 webrtc:
   listen_port: 29434                   # the ICE port the client tunnels to
+  stun_servers:                        # public STUN for ICE candidate gathering
+    - "stun:stun.l.google.com:19302"   # Google's public STUN (default)
 
 signaling:
-  listen_port: 29435                   # the HTTP SDP offer/answer endpoint (Option B)
+  listen_port: 29435                   # the SDP offer/answer endpoint (Option B)
+  auth_token: ""                       # shared secret; set non-empty before exposing to the internet
+  tls:                                 # HTTPS for the signaling endpoint (recommended for direct connection)
+    cert: ""                           # path to fullchain.pem; empty = plain HTTP (localhost dev)
+    key: ""                            # path to privkey.pem; empty = plain HTTP (localhost dev)
