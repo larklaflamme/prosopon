@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Prosopon</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Titlebar (frameless drag region) -->
+  <header class="titlebar" data-tauri-drag-region>
+    <span class="status-dot" id="status-dot"></span>
+    <span class="title" data-tauri-drag-region>Prosopon</span>
+    <div class="window-controls">
+      <button id="btn-minimize" title="Minimize" aria-label="Minimize">&#x2212;</button>
+      <button id="btn-close" title="Hide to tray" aria-label="Hide to tray">&#x2715;</button>
+    </div>
+  </header>
+
+  <!-- Orb -->
+  <main class="orb-stage">
+    <div class="orb" id="orb" data-state="disconnected">
+      <div class="orb-glow"></div>
+    </div>
+    <div class="state-label" id="state-label">disconnected</div>
+  </main>
+
+  <!-- Transcript (ephemeral — cleared on quit) -->
+  <section class="transcript" id="transcript">
+    <div class="empty-hint">Say &ldquo;Hey Skye&rdquo; to begin.</div>
+  </section>
+
+  <!-- Bottom bar -->
+  <footer class="bottombar">
+    <button id="btn-mute" class="mute" title="Mute" aria-label="Mute">&#127908;</button>
+    <span class="latency" id="latency">&mdash; ms</span>
+  </footer>
+
+  <script src="main.js"></script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+# Prosopon server configuration.
+# Every key is optional — missing keys fall back to the defaults below.
+
+tts:
+  base_url: "http://localhost:21802"   # Kokoro (docker)
+  model: "kokoro"                      # tts-1 | tts-1-hd | kokoro
+  voice: "af_heart"                    # default; Lark's deliberate choice (not af_sky)
+
+cognition:
+  base_url: "http://localhost:11434"   # Ollama
+  model: "qwen2.5:3b"                  # fast-but-dumb default (M0); swap to qwen3:30b for smart tier
+
+webrtc:
+  listen_port: 29434                   # the port the client tunnels to

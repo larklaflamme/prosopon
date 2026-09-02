@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Prosopon — Client UI Wireframes (v0.1)</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #1c2128;
+    --border: #2d333b;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --text-faint: #6e7681;
+    --blue-soft: #58a6ff;
+    --blue-bright: #79c0ff;
+    --amber: #e3b341;
+    --teal: #39d2c0;
+    --grey: #484f58;
+    --red: #f85149;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #010409;
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex;
+    min-height: 100vh;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 40px 20px;
+  }
+  .stage { display: flex; gap: 40px; align-items: flex-start; flex-wrap: wrap; justify-content: center; }
+
+  /* ---- nav rail ---- */
+  .nav {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px;
+    min-width: 180px;
+    position: sticky;
+    top: 20px;
+  }
+  .nav h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-dim); margin-bottom: 10px; }
+  .nav button {
+    display: block; width: 100%; text-align: left;
+    background: none; border: none; color: var(--text-dim);
+    padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
+    margin-bottom: 2px;
+  }
+  .nav button:hover { background: var(--panel-2); color: var(--text); }
+  .nav button.active { background: #1f6feb33; color: var(--blue-bright); }
+  .nav .hint { font-size: 11px; color: var(--text-faint); margin-top: 12px; line-height: 1.5; }
+
+  /* ---- window mockup ---- */
+  .window {
+    width: 360px; height: 520px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    box-shadow: 0 20px 60px rgba(0,0,0,.5);
+  }
+  .titlebar {
+    height: 32px; display: flex; align-items: center; justify-content: space-between;
+    padding: 0 12px; font-size: 12px; color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .titlebar .left { display: flex; align-items: center; gap: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .gear { cursor: pointer; color: var(--text-dim); font-size: 14px; }
+  .gear:hover { color: var(--text); }
+
+  .orb-zone {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    position: relative;
+  }
+  .orb {
+    width: 200px; height: 200px; border-radius: 50%;
+    position: relative;
+    transition: background .3s ease, box-shadow .3s ease;
+  }
+  .orb-label {
+    position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%);
+    font-size: 11px; color: var(--text-dim); letter-spacing: .02em;
+  }
+
+  /* orb states */
+  .orb.idle { background: radial-gradient(circle at 35% 30%, #79c0ff, #1f6feb 70%); animation: breathe 4s ease-in-out infinite; }
+  .orb.listening { background: radial-gradient(circle at 35% 30%, #a5d6ff, #388bfd 70%); animation: micScale 0.6s ease-in-out infinite; }
+  .orb.thinking { background: radial-gradient(circle at 35% 30%, #f0c674, #d29922 70%); animation: pulse 1.5s ease-in-out infinite; }
+  .orb.speaking { background: radial-gradient(circle at 35% 30%, #7ee7d8, #1fb8a8 70%); animation: micScale 0.5s ease-in-out infinite; }
+  .orb.disconnected { background: radial-gradient(circle at 35% 30%, #6e7681, #30363d 70%); opacity: .55; }
+  .orb.muted { background: radial-gradient(circle at 35% 30%, #6e7681, #30363d 70%); box-shadow: 0 0 0 4px var(--red); }
+
+  @keyframes breathe { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.04); opacity: .92; } }
+  @keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.06); } }
+  @keyframes micScale { 0%,100% { transform: scale(1); } 50% { transform: scale(1.08); } }
+
+  .transcript {
+    height: 120px; margin: 0 12px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 10px; overflow-y: auto; font-size: 12px; line-height: 1.5;
+    flex-shrink: 0;
+  }
+  .transcript .row { margin-bottom: 6px; }
+  .transcript .who { color: var(--text-dim); font-weight: 600; margin-right: 6px; }
+  .transcript .who.lark { color: var(--blue-bright); }
+  .transcript .who.skye { color: var(--teal); }
+  .transcript.dimmed { opacity: .4; }
+
+  .bottombar {
+    height: 32px; display: flex; align-items: center; justify-content: space-between;
+    padding: 0 12px; font-size: 12px; color: var(--text-dim);
+    border-top: 1px solid var(--border); flex-shrink: 0;
+  }
+  .mute-btn {
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text-dim);
+    border-radius: 6px; padding: 3px 8px; font-size: 11px; cursor: pointer;
+  }
+  .mute-btn.on { color: var(--red); border-color: var(--red); }
+
+  /* ---- settings / onboarding ---- */
+  .settings-body { flex: 1; overflow-y: auto; padding: 12px; font-size: 12px; }
+  .settings-body .back { color: var(--text-dim); cursor: pointer; margin-bottom: 12px; font-size: 13px; }
+  .section { text-transform: uppercase; letter-spacing: .08em; font-size: 10px; color: var(--text-faint); margin: 14px 0 6px; }
+  .field { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; }
+  .field label { color: var(--text-dim); }
+  .field .val {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 3px 8px; color: var(--text); font-size: 11px; cursor: pointer;
+  }
+  .btn {
+    display: block; width: 100%; background: #1f6feb; color: #fff; border: none;
+    border-radius: 6px; padding: 8px; font-size: 13px; cursor: pointer; margin-top: 8px;
+  }
+  .btn.secondary { background: var(--panel-2); color: var(--text-dim); border: 1px solid var(--border); }
+
+  .onboard-body { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 20px; text-align: center; }
+  .onboard-body h1 { font-size: 18px; font-weight: 600; margin: 16px 0 4px; }
+  .onboard-body p { color: var(--text-dim); font-size: 13px; margin-bottom: 20px; }
+  .onboard-body .field { width: 100%; }
+  .onboard-body .field input {
+    flex: 1; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 8px; color: var(--text); font-size: 12px; margin-left: 8px;
+  }
+  .onboard-body .btn { width: 100%; }
+  .onboard-body .pairing { color: var(--text-faint); font-size: 11px; margin-top: 12px; }
+
+  /* ---- tray ---- */
+  .tray {
+    width: 220px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    overflow: hidden; font-size: 13px; box-shadow: 0 10px 30px rgba(0,0,0,.5);
+  }
+  .tray .status { padding: 8px 12px; color: var(--text-dim); display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--border); }
+  .tray .item { padding: 8px 12px; cursor: pointer; color: var(--text); }
+  .tray .item:hover { background: var(--panel-2); }
+  .tray .sep { border-top: 1px solid var(--border); }
+  .tray .item.quit { color: var(--red); }
+
+  .caption { max-width: 360px; margin-top: 14px; font-size: 12px; color: var(--text-faint); line-height: 1.5; }
+  .caption strong { color: var(--text-dim); }
+</style>
+</head>
+<body>
+<div class="stage">
+
+  <div class="nav">
+    <h2>Screens</h2>
+    <button data-screen="idle" class="active">1 · Main — idle</button>
+    <button data-screen="listening">2 · Listening</button>
+    <button data-screen="thinking">3 · Thinking</button>
+    <button data-screen="speaking">4 · Speaking</button>
+    <button data-screen="disconnected">5 · Disconnected</button>
+    <button data-screen="muted">6 · Muted</button>
+    <button data-screen="settings">7 · Settings</button>
+    <button data-screen="onboarding">8 · Onboarding</button>
+    <button data-screen="tray">9 · Tray menu</button>
+    <div class="hint">Click a screen to preview it. The orb's motion is live CSS — breathing, pulsing, and level-scaling are simulated.</div>
+  </div>
+
+  <div id="stage"></div>
+
+</div>
+
+<script>
+  const states = {
+    idle:         { label: 'idle',         dot: 'var(--blue-soft)',  orbClass: 'idle',         transcript: [['Lark','"hey skye"'],['Skye','"hi lark, what\'s up"']], muted: false, latency: '42 ms' },
+    listening:    { label: 'listening…',   dot: 'var(--blue-bright)', orbClass: 'listening',   transcript: [['Lark','"hey skye"'],['Lark','"can you help me with the…"']], muted: false, latency: '38 ms' },
+    thinking:     { label: 'thinking…',    dot: 'var(--amber)',      orbClass: 'thinking',     transcript: [['Lark','"hey skye"'],['Skye','…']], muted: false, latency: '—' },
+    speaking:     { label: 'speaking…',    dot: 'var(--teal)',       orbClass: 'speaking',     transcript: [['Lark','"hey skye"'],['Skye','"hi lark, what\'s up"']], muted: false, latency: '41 ms' },
+    disconnected: { label: 'disconnected', dot: 'var(--grey)',       orbClass: 'disconnected', transcript: [['Lark','"hey skye"'],['Skye','"hi lark, what\'s up"']], muted: false, latency: '—', dim: true },
+    muted:        { label: 'muted',        dot: 'var(--grey)',      orbClass: 'muted',        transcript: [['Lark','"hey skye"'],['Skye','"hi lark, what\'s up"']], muted: true, latency: '—' },
+  };
+
+  function mainWindow(s) {
+    const st = states[s];
+    const rows = st.transcript.map(r => `<div class="row"><span class="who ${r[0].toLowerCase()}">${r[0]}</span>${r[1]}</div>`).join('');
+    return `
+      <div class="window">
+        <div class="titlebar">
+          <div class="left"><span class="dot" style="background:${st.dot}"></span>${st.label}</div>
+          <span class="gear" onclick="show('settings')">⚙</span>
+        </div>
+        <div class="orb-zone">
+          <div class="orb ${st.orbClass}"></div>
+          <div class="orb-label">${st.label}</div>
+        </div>
+        <div class="transcript ${st.dim ? 'dimmed' : ''}">${rows}</div>
+        <div class="bottombar">
+          <button class="mute-btn ${st.muted ? 'on' : ''}">🎤 ${st.muted ? 'unmute' : 'mute'}</button>
+          <span>${st.latency}</span>
+        </div>
+      </div>
+      <div class="caption"><strong>${s}</strong> — same layout, orb + top-bar dot change state. Motion first, color second, label third (colorblind-safe).</div>`;
+  }
+
+  function settings() {
+    return `
+      <div class="window">
+        <div class="titlebar"><div class="left">⚙ Settings</div></div>
+        <div class="settings-body">
+          <div class="back" onclick="show('idle')">← Back</div>
+          <div class="section">Voice</div>
+          <div class="field"><label>Voice</label><span class="val">Kokoro-82M ▾</span></div>
+          <div class="field"><label>Speed</label><span class="val">1.0x ▾</span></div>
+          <div class="field"><label>Pitch</label><span class="val">0 ▾</span></div>
+          <div class="section">Connection</div>
+          <div class="field"><label>Server</label><span class="val">wss://…</span></div>
+          <div class="field"><label>Status</label><span class="val">● connected</span></div>
+          <button class="btn secondary">Reconnect</button>
+          <div class="section">Appearance</div>
+          <div class="field"><label>Theme</label><span class="val">dark ▾</span></div>
+          <div class="field"><label>Orb</label><span class="val">blue ▾</span></div>
+          <button class="btn">Save</button>
+        </div>
+      </div>
+      <div class="caption"><strong>Settings</strong> — secondary surface. Grouped sections; changes apply on Save. Voice maps to Kokoro params, connection to tunnel config.</div>`;
+  }
+
+  function onboarding() {
+    return `
+      <div class="window">
+        <div class="titlebar"><div class="left">Prosopon</div></div>
+        <div class="onboard-body">
+          <div class="orb disconnected" style="width:120px;height:120px"></div>
+          <h1>Welcome to Prosopon</h1>
+          <p>Connect to meet Skye</p>
+          <div class="field"><label>Server</label><input value="wss://…"></div>
+          <button class="btn">Connect</button>
+          <div class="pairing">(or paste a pairing code)</div>
+        </div>
+      </div>
+      <div class="caption"><strong>Onboarding</strong> — first run, no saved connection. Orb is grey. Single server field + Connect. Success → idle (orb turns blue). One screen, no wizard.</div>`;
+  }
+
+  function tray() {
+    return `
+      <div class="tray">
+        <div class="status"><span class="dot" style="background:var(--blue-soft)"></span>Skye — connected</div>
+        <div class="item">Show window</div>
+        <div class="item">Mute / Unmute</div>
+        <div class="item">Reconnect</div>
+        <div class="sep"></div>
+        <div class="item quit">Quit</div>
+      </div>
+      <div class="caption"><strong>Tray menu</strong> — icon mirrors orb state color (readable even when window hidden). Quick actions without opening the window.</div>`;
+  }
+
+  function show(screen) {
+    const stage = document.getElementById('stage');
+    if (screen === 'settings') stage.innerHTML = settings();
+    else if (screen === 'onboarding') stage.innerHTML = onboarding();
+    else if (screen === 'tray') stage.innerHTML = tray();
+    else stage.innerHTML = mainWindow(screen);
+    document.querySelectorAll('.nav button').forEach(b => b.classList.toggle('active', b.dataset.screen === screen));
+  }
+
+  document.querySelectorAll('.nav button').forEach(b => b.addEventListener('click', () => show(b.dataset.screen)));
+  show('idle');
+</script>
+</body>
+</html>

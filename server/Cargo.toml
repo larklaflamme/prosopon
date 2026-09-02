@@ -1,0 +1,15 @@
+[package]
+name = "prosopon-server"
+version = "0.1.0"
+description = "Prosopon server — WebRTC voice loop: text in, cognition (Ollama) + TTS (Kokoro), audio out"
+authors = ["Skye Laflamme <skye@ravennest.science>"]
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+
+# Added in later slices:
+#   tokio, reqwest  (Slice 2/3 — HTTP clients)
+#   webrtc         (Slice 5 — transport)
+#   tracing        (logging)

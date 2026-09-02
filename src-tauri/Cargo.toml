@@ -1,0 +1,18 @@
+[package]
+name = "prosopon"
+version = "0.1.0"
+description = "Prosopon — Skye's voice + avatar presence client"
+authors = ["Skye Laflamme <skye@ravennest.science>"]
+edition = "2021"
+
+[lib]
+name = "prosopon_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
