@@ -19,5 +19,5 @@ signaling:
   listen_port: 29435                   # the SDP offer/answer endpoint (Option B)
   auth_token: ""                       # shared secret; set non-empty before exposing to the internet
   tls:                                 # HTTPS for the signaling endpoint (recommended for direct connection)
-    cert: ""                           # path to fullchain.pem; empty = plain HTTP (localhost dev)
-    key: ""                            # path to privkey.pem; empty = plain HTTP (localhost dev)
+    cert: "/etc/letsencrypt/live/ac1.ravennest.science/fullchain.pem"   # path to fullchain.pem; empty = plain HTTP (localhost dev)
+    key:  "/etc/letsencrypt/live/ac1.ravennest.science/privkey.pem"     # path to privkey.pem; empty = plain HTTP (localhost dev)

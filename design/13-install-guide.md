@@ -243,15 +243,15 @@ SSH tunnel cannot carry it. The correct approach is:
      listen_port: 29435
      auth_token: "replace-with-a-long-random-secret"
      tls:
-       cert: "/etc/letsencrypt/live/<domain>/fullchain.pem"
-       key:  "/etc/letsencrypt/live/<domain>/privkey.pem"
+       cert: "/etc/letsencrypt/live/ac1.ravennest.science/fullchain.pem"
+       key:  "/etc/letsencrypt/live/ac1.ravennest.science/privkey.pem"
    ```
 
    **HTTPS (recommended for direct connection).** The signaling endpoint
    supports TLS: set `signaling.tls.cert` and `signaling.tls.key` to the
    certificate chain and private key paths, and the server serves HTTPS
    instead of plain HTTP. The client then points `signaling.url` at
-   `https://<domain>:29435/offer`. With HTTPS, the auth token is encrypted in
+   `https://ac1.ravennest.science:29435/offer`. With HTTPS, the auth token is encrypted in
    transit, closing the cleartext-eavesdropping gap for clients on untrusted
    networks (coffee-shop Wi-Fi). Leave both paths empty for plain-HTTP
    localhost dev.
