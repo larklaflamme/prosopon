@@ -23,9 +23,11 @@ use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use webrtc::peer_connection::{RTCIceCandidateInit, RTCSessionDescription};
 
+use crate::config::WebrtcConfig;
+use crate::pipeline::Pipeline;
 use crate::webrtc::WebRtcServer;
 
 /// The signaling wire message: an SDP description plus the trickled ICE
@@ -37,18 +39,36 @@ pub struct SignalingMessage {
     pub candidates: Vec<RTCIceCandidateInit>,
 }
 
-/// Shared state for the signaling endpoint: the WebRTC server that answers
-/// offers.
+/// Shared state for the signaling endpoint: the WebRTC config and pipeline
+/// used to build a *fresh* peer connection per offer, the auth token, and a
+/// registry of live sessions.
+///
+/// A WebRTC peer connection is bound to a single remote peer. Reusing one
+/// `pc` across offers leaves it stuck on the first client (the second offer's
+/// data channel never opens). So each offer gets its own `WebRtcServer`, and
+/// the answered connection is retained in `sessions` so its data channel
+/// stays alive for the duration of that client's session.
 pub struct SignalingState {
-    server: Arc<WebRtcServer>,
+    webrtc_config: WebrtcConfig,
+    pipeline: Arc<Pipeline>,
     auth_token: String,
+    sessions: Mutex<Vec<Arc<WebRtcServer>>>,
 }
 
 /// Build the signaling router: `POST /offer` → answer.
-pub fn router(server: Arc<WebRtcServer>, auth_token: String) -> Router {
+pub fn router(
+    webrtc_config: WebrtcConfig,
+    pipeline: Arc<Pipeline>,
+    auth_token: String,
+) -> Router {
     Router::new()
         .route("/offer", post(handle_offer))
-        .with_state(Arc::new(SignalingState { server, auth_token }))
+        .with_state(Arc::new(SignalingState {
+            webrtc_config,
+            pipeline,
+            auth_token,
+            sessions: Mutex::new(Vec::new()),
+        }))
 }
 
 /// Check the request's `Authorization: Bearer <token>` header against the
@@ -79,8 +99,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// Handle an offer: set it as the remote description, add the client's
-/// candidates, create the answer, and return it with the server's candidates.
+/// Handle an offer: build a fresh peer connection, set the offer as its remote
+/// description, add the client's candidates, create the answer, and return it
+/// with the server's candidates. The answered connection is retained so its
+/// data channel stays alive.
 ///
 /// Auth is checked *before* the body is parsed, so an unauthenticated request
 /// gets an empty 401 regardless of whether its body is valid JSON. (If we let
@@ -97,12 +119,22 @@ async fn handle_offer(
     }
     let msg: SignalingMessage = serde_json::from_slice(&body)
         .map_err(|_| (StatusCode::BAD_REQUEST, String::new()))?;
-    state
-        .server
+
+    // A fresh peer connection per offer — a `pc` is single-peer.
+    let server = Arc::new(
+        WebRtcServer::new(&state.webrtc_config, state.pipeline.clone())
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+    );
+    let answer = server
         .answer(msg.description, msg.candidates)
         .await
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Retain the connection so its data channel stays alive for the session.
+    state.sessions.lock().unwrap().push(server);
+
+    Ok(Json(answer))
 }
 
 #[cfg(test)]
@@ -113,17 +145,9 @@ mod tests {
 
     #[tokio::test]
     async fn router_builds_with_default_config() {
-        let mut config = Config::default();
-        // Bind to an ephemeral port so this test doesn't collide with the
-        // webrtc module's own test (both would otherwise grab 29434).
-        config.webrtc.listen_port = 0;
+        let config = Config::default();
         let pipeline = Arc::new(Pipeline::new(&config));
-        let server = Arc::new(
-            WebRtcServer::new(&config.webrtc, pipeline)
-                .await
-                .expect("server should build with host-only ICE"),
-        );
-        let _app = router(server, String::new());
+        let _app = router(config.webrtc.clone(), pipeline, String::new());
     }
 
     #[test]

@@ -1,14 +1,17 @@
 //! Prosopon server entry point.
 //!
-//! Loads `config.yaml`, builds the voice-loop pipeline and the WebRTC server,
-//! and serves the HTTP signaling endpoint (Option B). The client POSTs its SDP
-//! offer to `/offer`, receives the answer, and the data channel carries text
-//! (client → server) and Ogg Opus audio (server → client).
+//! Loads `config.yaml`, builds the voice-loop pipeline, and serves the HTTP
+//! signaling endpoint (Option B). The client POSTs its SDP offer to `/offer`,
+//! receives the answer, and the data channel carries text (client → server)
+//! and Ogg Opus audio (server → client).
+//!
+//! Each offer gets a *fresh* peer connection (built inside the signaling
+//! handler), so the server can serve multiple sequential clients rather than
+//! being stuck on the first one to connect.
 
 use prosopon_server::config::Config;
 use prosopon_server::pipeline::Pipeline;
 use prosopon_server::signaling;
-use prosopon_server::webrtc::WebRtcServer;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -29,9 +32,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let pipeline = Arc::new(Pipeline::new(&config));
-    let server = Arc::new(WebRtcServer::new(&config.webrtc, pipeline).await?);
 
-    let app = signaling::router(server, config.signaling.auth_token.clone());
+    let app = signaling::router(
+        config.webrtc.clone(),
+        pipeline,
+        config.signaling.auth_token.clone(),
+    );
     let addr = format!("0.0.0.0:{}", config.signaling.listen_port);
 
     if config.signaling.tls.enabled() {
