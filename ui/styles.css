@@ -218,3 +218,19 @@ body {
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
 }
+
+/* ---- Connect button ---- */
+.connect {
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  background: transparent;
+  font-size: 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-dim);
+}
+
+.connect:hover { background: #262a33; color: var(--text); }
+.connect.connected { color: #14b8a6; }
+.connect:disabled { opacity: 0.5; cursor: default; }

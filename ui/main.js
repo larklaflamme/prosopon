@@ -8,6 +8,7 @@ const orb = document.getElementById("orb");
 const stateLabel = document.getElementById("state-label");
 const statusDot = document.getElementById("status-dot");
 const muteBtn = document.getElementById("btn-mute");
+const connectBtn = document.getElementById("btn-connect");
 const transcript = document.getElementById("transcript");
 
 const STATE_COLORS = {
@@ -25,6 +26,13 @@ function applyState(state) {
   statusDot.style.background = STATE_COLORS[s] || "#4a4a55";
   orb.classList.toggle("is-muted", state.muted);
   muteBtn.classList.toggle("muted", state.muted);
+  updateConnectButton(state);
+}
+
+function updateConnectButton(state) {
+  const connected = state.state !== "disconnected";
+  connectBtn.textContent = connected ? "Disconnect" : "Connect";
+  connectBtn.classList.toggle("connected", connected);
 }
 
 function addLine(speaker, text) {
@@ -42,18 +50,53 @@ function addLine(speaker, text) {
   transcript.scrollTop = transcript.scrollHeight;
 }
 
+async function doConnect() {
+  console.log("[prosopon] connect clicked");
+  connectBtn.disabled = true;
+  connectBtn.textContent = "Connecting…";
+  try {
+    await invoke("connect_webrtc");
+    console.log("[prosopon] connect_webrtc returned OK");
+  } catch (e) {
+    console.error("[prosopon] connect_webrtc failed:", e);
+    addLine("sky", "connect failed: " + e);
+  } finally {
+    connectBtn.disabled = false;
+  }
+}
+
+async function doDisconnect() {
+  console.log("[prosopon] disconnect clicked");
+  try {
+    const state = await invoke("disconnect");
+    applyState(state);
+    console.log("[prosopon] disconnect OK, state =", state.state);
+  } catch (e) {
+    console.error("[prosopon] disconnect failed:", e);
+  }
+}
+
 async function init() {
   // Initial state from the Rust side.
   try {
     const state = await invoke("get_state");
     applyState(state);
+    console.log("[prosopon] initial state:", state);
   } catch (e) {
-    console.error("get_state failed:", e);
+    console.error("[prosopon] get_state failed:", e);
   }
 
   // Live state changes.
   await listen("state", (event) => {
+    console.log("[prosopon] state event:", event.payload);
     applyState(event.payload);
+  });
+
+  // Connect / disconnect toggle.
+  connectBtn.addEventListener("click", () => {
+    const connected = orb.dataset.state !== "disconnected";
+    if (connected) doDisconnect();
+    else doConnect();
   });
 
   // Mute toggle.
@@ -63,7 +106,7 @@ async function init() {
       const state = await invoke("set_muted", { muted: next });
       applyState(state);
     } catch (e) {
-      console.error("set_muted failed:", e);
+      console.error("[prosopon] set_muted failed:", e);
     }
   });
 

@@ -14,6 +14,7 @@ use std::path::Path;
 pub struct ClientConfig {
     pub signaling: SignalingConfig,
     pub webrtc: WebrtcConfig,
+    pub wake_word: WakeWordConfig,
 }
 
 impl Default for ClientConfig {
@@ -21,6 +22,7 @@ impl Default for ClientConfig {
         Self {
             signaling: SignalingConfig::default(),
             webrtc: WebrtcConfig::default(),
+            wake_word: WakeWordConfig::default(),
         }
     }
 }
@@ -60,6 +62,35 @@ impl Default for WebrtcConfig {
     fn default() -> Self {
         Self {
             stun_servers: vec!["stun:stun.l.google.com:19302".into()],
+        }
+    }
+}
+
+/// Wake-word detection settings (openWakeWord sidecar).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct WakeWordConfig {
+    /// The Python interpreter that runs the sidecar. Must be the venv's
+    /// Python (which has `openwakeword` installed), e.g.
+    /// `client/.venv/bin/python` — not the system `python3`.
+    pub python: String,
+    /// The openWakeWord model: a bundled name (e.g. `hey_jarvis`) or a path
+    /// to a custom `.tflite`. "Hey Skye" requires a custom-trained model;
+    /// M0 uses a placeholder until that model exists.
+    pub model: String,
+    /// Detection threshold (0.0–1.0). Higher = fewer false positives.
+    pub threshold: f32,
+    /// Path to the Python sidecar script, relative to the working directory.
+    pub sidecar_path: String,
+}
+
+impl Default for WakeWordConfig {
+    fn default() -> Self {
+        Self {
+            python: "python3".into(),
+            model: "hey_jarvis".into(),
+            threshold: 0.5,
+            sidecar_path: "sidecar/wake_word.py".into(),
         }
     }
 }
@@ -118,6 +149,9 @@ mod tests {
         assert_eq!(cfg, ClientConfig::default());
         assert_eq!(cfg.signaling.url, "http://localhost:29435/offer");
         assert_eq!(cfg.webrtc.stun_servers, vec!["stun:stun.l.google.com:19302"]);
+        assert_eq!(cfg.wake_word.model, "hey_jarvis");
+        assert_eq!(cfg.wake_word.threshold, 0.5);
+        assert_eq!(cfg.wake_word.python, "python3");
     }
 
     #[test]
@@ -126,6 +160,7 @@ mod tests {
             .expect("partial config should parse");
         assert_eq!(cfg.signaling.url, "http://example:29435/offer");
         assert_eq!(cfg.webrtc.stun_servers, vec!["stun:stun.l.google.com:19302"]);
+        assert_eq!(cfg.wake_word.model, "hey_jarvis");
     }
 
     #[test]
@@ -137,10 +172,18 @@ signaling:
 webrtc:
   stun_servers:
     - "stun:stun.nvidia.com:3478"
+wake_word:
+  python: "client/.venv/bin/python"
+  model: "hey_skyte"
+  threshold: 0.7
+  sidecar_path: "sidecar/wake_word.py"
 "#;
         let cfg = ClientConfig::from_str(yaml).expect("full config should parse");
         assert_eq!(cfg.signaling.url, "http://example:29435/offer");
         assert_eq!(cfg.signaling.auth_token, "hunter2");
         assert_eq!(cfg.webrtc.stun_servers, vec!["stun:stun.nvidia.com:3478"]);
+        assert_eq!(cfg.wake_word.python, "client/.venv/bin/python");
+        assert_eq!(cfg.wake_word.model, "hey_skyte");
+        assert_eq!(cfg.wake_word.threshold, 0.7);
     }
 }
