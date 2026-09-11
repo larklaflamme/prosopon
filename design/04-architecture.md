@@ -1,23 +1,32 @@
 # 04 — Architecture & Decisions
 
-## The shape of the system (decided 2026-09-01)
+> **Updated 2026-09-11** (Skye) — reflects the *implemented* system, not the
+> original 2026-09-01 sketch. Two things changed materially since the first
+> draft: (1) transport moved from SSH tunneling to **HTTP signaling (Option B —
+> SDP offer/answer exchange)**, and (2) the wake word is now a **Python sidecar
+> (openWakeWord)** running the bundled `hey_jarvis` model as a placeholder for
+> the eventual custom "Hey Skye" model. Everything below is grounded in the
+> actual source on disk.
+
+## The shape of the system
 
 **Client/server split. Voice first. Avatar is phase 2.**
 
 ```
-[Client — Rust, on Mac]              [Server — Rust, on server]
-  mic ──► wake word ("Hey Skye")       Skye's cognition
-  STT (Moonshine) ──► text             text ──► TTS (Kokoro) ──► audio
-  speaker ◄── audio                    WebRTC server
-  WebRTC client
-        ▲                                    │
-        └────── text ──►  ◄── audio (WebRTC) ┘
+[Client — Rust (Tauri) + Python sidecars, on Mac]     [Server — Rust, on server]
+  mic ──► wake word (openWakeWord sidecar)              Skye's cognition (Ollama)
+  STT (Moonshine sidecar) ──► text                     text ──► TTS (Kokoro sidecar) ──► audio
+  speaker ◄── audio                                     HTTP signaling (axum) + WebRTC
+  WebRTC client (data channel)
+        ▲                                              │
+        └──────── text ──►  ◄── audio (Ogg Opus) ──────┘
 ```
 
-Two Rust binaries, one on each side. No browser. The client is Lark's
-interface (mic, speaker, wake word, STT); the server is Skye (cognition +
-her voice). Only text and audio cross the wire — no webcam, no rendering,
-no browser security model to fight.
+Two Rust binaries, one on each side, plus **Python sidecars** for the ML-heavy
+audio stages (wake word, STT, TTS). No browser. The client is Lark's interface
+(mic, speaker, wake word, STT); the server is Skye (cognition + her voice).
+Only text and audio cross the wire — no webcam, no rendering, no browser
+security model to fight.
 
 ## Why this shape
 
@@ -30,8 +39,14 @@ no browser security model to fight.
   speaker); the server is where Skye lives (cognition, voice). This keeps
   "Skye's voice" on the server, which matters if we ever go multi-user
   (one voice, generated once, broadcast to many).
+- **Python sidecars for ML** — the wake word, STT, and TTS models are Python
+  ecosystems (openWakeWord, Moonshine/sherpa-onnx, Kokoro). Rather than port
+  them to Rust immediately, each runs as a Python sidecar process that the
+  Rust shell spawns and talks to over stdio (wake word) or HTTP (STT/TTS).
+  This unblocks fast; consolidation to Rust is a later optimization, not a
+  correctness requirement.
 
-## Client UI (decided 2026-09-01)
+## Client UI (Tauri)
 
 **Tauri** — Rust shell + the *system* WebView (WKWebView on macOS).
 
@@ -53,72 +68,125 @@ get a web-quality UI without a browser.
   product without real effort. Tauri gives a rich, familiar UI for far less
   work, and a web version comes free if we ever want one.
 - **The UI is HTML/CSS/JS, not Rust** — the tradeoff. The Rust shell handles
-  audio I/O, transport, and state; the webview renders the panel.
+  audio I/O, transport, and state; the webview renders the panel (the orb).
 - **Phase 2 note** — the avatar *face* is a separate rendering problem. The
   control panel (Tauri) and the 3D face (bevy, or WebGL inside the Tauri
   webview) are different surfaces; see "Phase 2" below.
 
-## Transport & connection (decided 2026-09-01)
+## Transport & connection (Option B — HTTP signaling)
 
-**SSH tunneling for now.** No public exposure of the server's WebRTC port.
-The client connects to a local `ws://` URL that is forwarded over an SSH
-tunnel to the server.
+**HTTP signaling with an SDP offer/answer exchange.** The client POSTs its
+SDP offer (plus its trickled ICE candidates) to the server's `/offer`
+endpoint and receives the server's answer (plus its candidates) in the same
+round-trip. The WebRTC data channel then carries the actual traffic.
 
 ```
 [Mac client]                          [Server]
-  config.yaml:                          WebRTC server
-    url: ws://localhost:29434           listening on localhost:29434
-        │                                    ▲
-        └── ssh -L 29434:localhost:29434 ────┘
+  WebRtcClient                          axum HTTP server
+    POST /offer ──────────────────────►  builds a fresh peer connection
+    ◄────────────────────── answer ────  returns answer + candidates
+    data channel (text →, audio ←)      retains the connection in `sessions`
 ```
 
-- **`config.yaml`** — the client reads its connection target from a config
-  file, not hardcoded. Example: `url: ws://localhost:29434`. This keeps the
-  endpoint swappable (local tunnel, LAN, or a future public URL) without
-  recompiling.
-- **SSH tunnel** — `ssh -L 29434:localhost:29434 user@server` forwards the
-  client's local port to the server's WebRTC listener. The server never
-  exposes the port publicly; auth is the SSH key itself.
-- **Why** — security for now. No TLS cert, no firewall hole, no public
-  WebRTC endpoint. The tunnel is the auth boundary.
+- **`config.yaml`** — both sides read their connection target from a config
+  file, not hardcoded. The client's `signaling.url` is the server's `/offer`
+  endpoint (e.g. `https://ac1.ravennest.science:29435/offer`); the server's
+  `signaling.listen_port` is where it listens (default 29435).
+- **Auth** — a shared secret presented as `Authorization: Bearer <token>`.
+  Empty token = auth disabled (localhost dev). The server warns loudly if it
+  is exposed with an empty token. The check is constant-time (no timing
+  side-channel) and runs *before* body parsing (an unauthenticated request
+  gets an empty 401, leaking nothing about the endpoint's shape).
+- **TLS** — when `signaling.tls.cert` and `signaling.tls.key` are both set,
+  the server serves HTTPS; otherwise plain HTTP (localhost dev).
+- **Fresh peer connection per offer** — a WebRTC peer connection is bound to
+  a single remote peer. Reusing one `pc` across offers leaves it stuck on the
+  first client. So each offer builds a new `WebRtcServer`, and the answered
+  connection is retained in a `sessions` registry so its data channel stays
+  alive for that client's session.
+- **STUN** — both sides use a public STUN server (Google's, by default) so
+  the Mac client can reach the server over the internet via server-reflexive
+  candidates (host-only candidates don't cross NAT).
 
-This is a deliberate v1 choice. If we later want a public endpoint (or
-multi-user), we swap the tunnel for a real TLS + auth layer — the
-`config.yaml` indirection is exactly what makes that swap cheap.
+This replaced the original SSH-tunnel sketch. The `config.yaml` indirection
+is what made the swap cheap: the endpoint is a config value, not a hardcoded
+`ws://localhost` URL.
+
+## Data channel protocol
+
+The data channel is ordered and reliable. Two message kinds:
+
+- **Client → Server:** a text message carrying the user's utterance.
+- **Server → Client:** a text header `audio:<total_bytes>` followed by
+  `ceil(total_bytes / 16 KiB)` binary messages carrying the Ogg Opus chunks.
+  The client reassembles by concatenation.
 
 ## Where each component runs
 
-| Component | Runs on | Why |
-|-----------|---------|-----|
-| Wake word ("Hey Skye") | Client | Mic is on the client; must be always-on locally |
-| STT (Moonshine) | Client | Streaming, latency-first: instant reaction |
-| Cognition (Skye) | Server | That's where Skye is |
-| TTS (Kokoro) | Server | Skye's voice lives with Skye; one voice for all clients |
-| Transport | Both (webrtc-rs) | P2P between the two binaries, over SSH tunnel |
-| Client UI | Client (Tauri) | Web-quality panel; Rust shell owns audio I/O |
+| Component | Runs on | How | Why |
+|-----------|---------|-----|-----|
+| Wake word | Client | openWakeWord **Python sidecar** (stdio) | Mic is on the client; must be always-on locally |
+| STT (Moonshine) | Client | **Python sidecar** → sherpa-onnx | Streaming, latency-first: instant reaction |
+| Cognition (Skye) | Server | Ollama (HTTP, `qwen2.5:3b`) | That's where Skye is |
+| TTS (Kokoro) | Server | **Python sidecar** (HTTP, `af_heart`) | Skye's voice lives with Skye; one voice for all clients |
+| Signaling | Server | axum HTTP (`/offer`) | SDP offer/answer + ICE candidate exchange |
+| Transport | Both | webrtc-rs data channel | P2P between the two binaries |
+| Client UI | Client (Tauri) | Rust shell + system WebView | Web-quality panel; Rust shell owns audio I/O |
 
 **The key asymmetry:** STT runs client-side (text crosses the wire, tiny),
 TTS runs server-side (audio crosses the wire, the bulk). This is the
 lowest-latency split: audio never round-trips the network before being
 understood, and Skye's voice is generated where she is.
 
+## The wake word (current state)
+
+The wake word is **`hey_jarvis`** — the bundled openWakeWord model — used as
+a placeholder. The eventual target is a custom-trained **"Hey Skye"** model,
+which does not exist yet; M0 ships with the placeholder so the full pipeline
+can be exercised end-to-end before the custom model is trained.
+
+Mechanically: the Rust `WakeWordDetector` spawns `sidecar/wake_word.py`,
+streams the mic's 16 kHz mono f32 PCM (converted to int16) to its stdin, and
+reads its stdout — each `WAKE` line becomes a wake event on an mpsc channel.
+The mic capture and sidecar I/O are both blocking, so they run on dedicated
+threads. `cpal::Stream` is `!Send` on CoreAudio, so the `Mic` is created
+*inside* the writer thread and never crosses a thread boundary. Dropping the
+detector kills the sidecar, closing the pipes and letting both threads exit.
+
 ## Data flow (phase 1 — voice)
 
 ```
-Lark speaks ──► Mac mic ──► wake word ──► audio buffer
+Lark speaks ──► Mac mic ──► wake word ("hey_jarvis") ──► audio buffer
    └─ Moonshine (streaming) ──► text
-        ──► WebRTC (over SSH tunnel) ──► server ──► Skye cognition ──► response text
-        ──► TTS (Kokoro) ──► audio ──► WebRTC ──► Mac speaker ──► Lark hears
+        ──► WebRTC data channel ──► server ──► Skye cognition (Ollama) ──► response text
+        ──► TTS (Kokoro) ──► Ogg Opus ──► WebRTC ──► Mac speaker ──► Lark hears
 ```
 
-1. **Incoming (client)**: mic → wake-word gate ("Hey Skye") → audio buffer.
+1. **Incoming (client)**: mic → wake-word gate → audio buffer.
 2. **STT (client)**: Moonshine streams the utterance → text.
-3. **Transport**: text → WebRTC data channel → server (over SSH tunnel).
-4. **Cognition (server)**: text → Skye → response text.
-5. **Outgoing (server)**: response text → Kokoro TTS → audio (streamed
-   sentence-by-sentence).
-6. **Transport**: audio → WebRTC audio track (Opus) → client.
+3. **Transport**: text → WebRTC data channel → server.
+4. **Cognition (server)**: text → Ollama → response text.
+5. **Outgoing (server)**: response text → Kokoro TTS → Ogg Opus (streamed).
+6. **Transport**: audio → WebRTC data channel (chunked) → client.
 7. **Playback (client)**: audio → speaker.
+
+## Client state machine
+
+The Tauri shell owns a presence state machine — the single source of truth
+that drives the orb's color + motion. `muted` is an orthogonal flag, not a
+state (you can be muted in any state).
+
+| State | Orb color | Motion |
+|-------|-----------|--------|
+| Disconnected | grey | static |
+| Idle | soft blue | breathing |
+| Listening | bright blue | level |
+| Thinking | amber | pulsing |
+| Speaking | teal | level |
+
+Transitions: `Connect`, `Disconnect`, `WakeWord`, `UtteranceComplete`,
+`ResponseStarted`, `ResponseComplete`, `ToggleMute`/`SetMute`. The machine
+validates each transition and emits a `state` event to the webview.
 
 ## Phase 2 — avatar (deferred, not designed yet)
 
@@ -139,44 +207,23 @@ renderer is not.
 
 | Subsystem | Decision | Rationale |
 |-----------|----------|-----------|
-| Architecture | Client/server, two Rust binaries | No browser; clean audio-I/O vs cognition split |
+| Architecture | Client/server, two Rust binaries + Python sidecars | No browser; clean audio-I/O vs cognition split |
 | Phase 1 scope | Voice only | Fastest path to conversation; face is phase 2 |
 | Client UI | Tauri (Rust + system WebView) | Web-quality UI without a browser; OpenAI/Anthropic pattern |
+| Wake word | openWakeWord sidecar, `hey_jarvis` placeholder | Bundled model unblocks the pipeline; "Hey Skye" needs a custom model |
 | STT | Moonshine (client-side) | MIT, streaming-native, instant reaction |
-| STT (v1.1) | + whisper.cpp second stage | Accurate full-utterance; Metal on M1 Max |
 | STT integration | Python sidecar → sherpa-onnx | Unblock fast, then consolidate to Rust |
 | TTS | Kokoro-82M (server-side) | Apache-2.0, 82M, CPU-fast, high quality |
-| TTS voice | Stock Kokoro voice | Decided; no cloning for v1 |
-| TTS integration | Python sidecar → ONNX/ort | Unblock fast, then consolidate |
-| Wake word | "Hey Skye" | Decided; enables upstream STT |
-| Transport | webrtc-rs 0.21 | P2P, pure Rust, single-user fit |
-| Connection | SSH tunnel + config.yaml | Security for now; swappable endpoint |
-| Audio codec | Opus | WebRTC default, speech-optimal |
-| Target hardware | MacBook Pro 16" 2021, M1 Max, 32GB | Client; macOS arm64 |
+| Cognition | Ollama (`qwen2.5:3b`) | Local, fast, no external API dependency |
+| Signaling | HTTP (Option B — SDP offer/answer) | Single round-trip carries offer + candidates; fresh `pc` per offer |
+| Transport | WebRTC data channel (webrtc-rs) | P2P, low-latency, full-duplex |
+| Auth | Bearer token (constant-time check) | Shared secret; empty = dev mode |
 
-## Decisions made (2026-09-01)
+## Current frontier — streaming orchestration
 
-1. **Architecture** — client/server split. Client (Rust) on Mac, server
-   (Rust) on server. No browser.
-2. **Phase 1** — voice only. Avatar (face) is phase 2.
-3. **Voice** — stock Kokoro voice (no cloning for v1).
-4. **Wake word** — "Hey Skye" triggers the incoming path (continuous
-   listening, no push-to-talk).
-5. **STT** — Moonshine only for v1 (streaming, instant reaction). Whisper
-   (whisper.cpp) is added as a second stage in v1.1. Client-side.
-6. **Language** — English-only for v1.
-7. **Target hardware** — MacBook Pro 16" 2021, M1 Max, 32GB, macOS arm64.
-8. **Connection** — SSH tunnel for now; client reads `ws://` URL from
-   `config.yaml` (e.g. `ws://localhost:29434`).
-9. **Client UI** — Tauri (Rust shell + system WebView). Same "webview
-   shell" pattern OpenAI/Anthropic use for cross-platform clients. Not a
-   browser — the Rust shell owns mic/speaker/filesystem directly.
-
-## Blocking on Lark
-
-1. **Server connection details** — the actual host/user for the SSH tunnel
-   (the `user@server` in `ssh -L 29434:localhost:29434 user@server`).
-
-*Last updated: 2026-09-01*
-
-[END FILE]
+The next work is the **two-tier response + streaming glue** for the Monday
+demo: begin TTS on the first sentence while the LLM is still generating the
+rest, so the response *starts* within a few hundred ms of the query ending.
+See `20-streaming-orchestration.md` for the design. The wake word, mic, STT
+sidecar, TTS sidecar, and WebRTC transport are all done; the orchestration
+and streaming overlap are the new pieces.
