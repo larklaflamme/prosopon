@@ -71,3 +71,4 @@ Thumbs.db
 
 # Local config with secrets (not committed)
 client/config.yaml
+server/config.yaml

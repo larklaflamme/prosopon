@@ -1,4 +1,4 @@
-# Prosopon server configuration.
+# Prosopon server configuration (EXAMPLE — copy to config.yaml and fill in secrets).
 # Every key is optional — missing keys fall back to the defaults below.
 
 tts:
@@ -17,7 +17,7 @@ webrtc:
 
 signaling:
   listen_port: 29435                   # the SDP offer/answer endpoint (Option B)
-  auth_token: ""                       # shared secret; set non-empty before exposing to the internet
+  auth_token: ""                       # shared secret; generate with: openssl rand -hex 32
   tls:                                 # HTTPS for the signaling endpoint (recommended for direct connection)
     cert: "/etc/letsencrypt/live/ac1.ravennest.science/fullchain.pem"   # path to fullchain.pem; empty = plain HTTP (localhost dev)
     key:  "/etc/letsencrypt/live/ac1.ravennest.science/privkey.pem"     # path to privkey.pem; empty = plain HTTP (localhost dev)
