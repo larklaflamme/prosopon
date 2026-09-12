@@ -4,9 +4,13 @@
 //! the mic's 16 kHz mono f32 PCM to its stdin (converted to int16), and reads
 //! its stdout. Each ``WAKE`` line becomes a wake event on the returned channel.
 //!
+//! The sidecar's stderr (debug scores, errors) is captured and forwarded to
+//! the caller via the `on_log` callback, so it can be surfaced in the app's
+//! logs panel rather than lost to the terminal.
+//!
 //! The mic capture and the sidecar I/O are both blocking, so they run on
 //! dedicated threads. Dropping the detector (or calling [`WakeWordDetector::stop`])
-//! kills the sidecar, which closes the pipes and lets both threads exit.
+//! kills the sidecar, which closes the pipes and lets all threads exit.
 //!
 //! Note: `cpal::Stream` is `!Send` on CoreAudio (macOS), so the [`Mic`] is
 //! created *inside* the writer thread and never crosses a thread boundary.
@@ -29,12 +33,13 @@ pub enum WakeWordError {
 
 /// A running wake-word detector.
 ///
-/// Holds the sidecar child process and the two worker threads. Wake events
+/// Holds the sidecar child process and the worker threads. Wake events
 /// are delivered on the `mpsc::Receiver<()>` returned by [`WakeWordDetector::start`].
 pub struct WakeWordDetector {
     child: Child,
     writer: Option<thread::JoinHandle<()>>,
     reader: Option<thread::JoinHandle<()>>,
+    stderr_reader: Option<thread::JoinHandle<()>>,
 }
 
 impl WakeWordDetector {
@@ -44,8 +49,13 @@ impl WakeWordDetector {
     /// `()` per wake-word detection. Blocks until the mic is confirmed open
     /// (or fails), so a missing device / denied permission surfaces as an
     /// error here rather than silently.
+    ///
+    /// `on_log` is invoked (from the sidecar's stderr reader thread and the
+    /// mic writer thread) with each log line, so the caller can surface
+    /// sidecar diagnostics in the UI.
     pub fn start(
         cfg: &WakeWordConfig,
+        on_log: impl Fn(String) + Send + Clone + 'static,
     ) -> Result<(Self, mpsc::Receiver<()>), WakeWordError> {
         let mut child = Command::new(&cfg.python)
             .arg(&cfg.sidecar_path)
@@ -56,7 +66,7 @@ impl WakeWordDetector {
             .arg("--debug")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()?;
 
         let stdin = child.stdin.take().ok_or_else(|| {
@@ -71,11 +81,18 @@ impl WakeWordDetector {
                 "sidecar stdout unavailable",
             ))
         })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            WakeWordError::Spawn(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "sidecar stderr unavailable",
+            ))
+        })?;
 
         let (wake_tx, wake_rx) = mpsc::channel::<()>();
 
         // Writer thread: creates the Mic *here* (so it stays on this thread),
         // then streams f32 chunks -> int16 PCM bytes -> sidecar stdin.
+        let on_log_writer = on_log.clone();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), crate::mic::MicError>>();
         let writer = thread::spawn(move || {
             let mic = match Mic::start() {
@@ -102,10 +119,10 @@ impl WakeWordDetector {
                 level_samples += chunk.len() as u64;
                 if level_samples >= 16_000 {
                     let rms = (level_sum_sq / level_samples as f64).sqrt();
-                    eprintln!(
-                        "[prosopon] mic level: rms={:.6} peak={:.6} samples={}",
+                    on_log_writer(format!(
+                        "mic level: rms={:.6} peak={:.6} samples={}",
                         rms, level_peak, level_samples
-                    );
+                    ));
                     level_samples = 0;
                     level_sum_sq = 0.0;
                     level_peak = 0.0;
@@ -153,11 +170,23 @@ impl WakeWordDetector {
             }
         });
 
+        // Stderr reader thread: sidecar diagnostics -> on_log.
+        let stderr_reader = thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                match line {
+                    Ok(l) => on_log(l),
+                    Err(_) => break,
+                }
+            }
+        });
+
         Ok((
             Self {
                 child,
                 writer: Some(writer),
                 reader: Some(reader),
+                stderr_reader: Some(stderr_reader),
             },
             wake_rx,
         ))
@@ -172,6 +201,9 @@ impl WakeWordDetector {
         }
         if let Some(r) = self.reader.take() {
             let _ = r.join();
+        }
+        if let Some(s) = self.stderr_reader.take() {
+            let _ = s.join();
         }
     }
 }

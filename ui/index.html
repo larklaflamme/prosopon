@@ -30,10 +30,20 @@
     <div class="empty-hint">Say &ldquo;Hey Skye&rdquo; to begin.</div>
   </section>
 
+  <!-- Logs panel (hidden by default; toggle from the bottom bar) -->
+  <section class="logs" id="logs" hidden>
+    <div class="logs-header">
+      <span class="logs-title">Logs</span>
+      <button id="btn-clear-logs" class="logs-clear" title="Clear logs">Clear</button>
+    </div>
+    <div class="logs-body" id="logs-body"></div>
+  </section>
+
   <!-- Bottom bar -->
   <footer class="bottombar">
     <button id="btn-connect" class="connect" title="Connect" aria-label="Connect">Connect</button>
     <button id="btn-mute" class="mute" title="Mute" aria-label="Mute">&#127908;</button>
+    <button id="btn-logs" class="logs-toggle" title="Toggle logs" aria-label="Toggle logs">Logs</button>
     <span class="latency" id="latency">&mdash; ms</span>
   </footer>
 

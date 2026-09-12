@@ -10,6 +10,12 @@ const statusDot = document.getElementById("status-dot");
 const muteBtn = document.getElementById("btn-mute");
 const connectBtn = document.getElementById("btn-connect");
 const transcript = document.getElementById("transcript");
+const logsPanel = document.getElementById("logs");
+const logsBody = document.getElementById("logs-body");
+const logsBtn = document.getElementById("btn-logs");
+const clearLogsBtn = document.getElementById("btn-clear-logs");
+
+const MAX_LOG_LINES = 500;
 
 const STATE_COLORS = {
   disconnected: "#4a4a55",
@@ -50,6 +56,21 @@ function addLine(speaker, text) {
   transcript.scrollTop = transcript.scrollHeight;
 }
 
+function addLog(entry) {
+  const line = document.createElement("div");
+  line.className = "log-line log-" + (entry.level || "info");
+  const src = document.createElement("span");
+  src.className = "log-source";
+  src.textContent = "[" + (entry.source || "?") + "]";
+  line.appendChild(src);
+  line.appendChild(document.createTextNode(entry.message || ""));
+  logsBody.appendChild(line);
+  while (logsBody.children.length > MAX_LOG_LINES) {
+    logsBody.removeChild(logsBody.firstChild);
+  }
+  logsBody.scrollTop = logsBody.scrollHeight;
+}
+
 async function doConnect() {
   console.log("[prosopon] connect clicked");
   connectBtn.disabled = true;
@@ -86,6 +107,15 @@ async function init() {
     console.error("[prosopon] get_state failed:", e);
   }
 
+  // Backfill buffered logs, then stream live ones.
+  try {
+    const existing = await invoke("get_logs");
+    for (const entry of existing) addLog(entry);
+  } catch (e) {
+    console.error("[prosopon] get_logs failed:", e);
+  }
+  await listen("log", (event) => addLog(event.payload));
+
   // Live state changes.
   await listen("state", (event) => {
     console.log("[prosopon] state event:", event.payload);
@@ -108,6 +138,17 @@ async function init() {
     } catch (e) {
       console.error("[prosopon] set_muted failed:", e);
     }
+  });
+
+  // Logs panel toggle.
+  logsBtn.addEventListener("click", () => {
+    logsPanel.hidden = !logsPanel.hidden;
+    logsBtn.classList.toggle("active", !logsPanel.hidden);
+  });
+
+  // Clear logs.
+  clearLogsBtn.addEventListener("click", () => {
+    logsBody.innerHTML = "";
   });
 
   // Window controls (frameless).

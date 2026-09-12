@@ -8,6 +8,8 @@ above the threshold.
 Protocol (stdin/stdout):
   stdin  : raw int16 little-endian PCM, 16 kHz mono, streamed continuously.
   stdout : the literal line ``WAKE`` on each detection.
+  stderr : human-readable diagnostics (rate-limited score summary, errors),
+           forwarded by the Rust shell to the app's logs panel.
 
 Usage:
   python3 wake_word.py --model hey_jarvis --threshold 0.5
@@ -18,6 +20,7 @@ The ``--model`` argument is either a bundled openWakeWord model name
 
 import argparse
 import sys
+import time
 
 import numpy as np
 
@@ -44,7 +47,7 @@ def main() -> None:
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="log the model score for every frame",
+        help="log a rate-limited score summary (once per second)",
     )
     args = parser.parse_args()
 
@@ -64,6 +67,8 @@ def main() -> None:
     bytes_per_chunk = args.chunk * 2  # int16 = 2 bytes per sample
 
     buf = b""
+    last_log = 0.0
+    max_score = 0.0
     while True:
         raw = stdin.read(bytes_per_chunk - len(buf))
         if not raw:
@@ -77,9 +82,16 @@ def main() -> None:
         prediction = model.predict(audio)
         score = float(prediction[args.model])
 
+        if score > max_score:
+            max_score = score
+
         if args.debug:
-            sys.stderr.write(f"score={score:.4f}\n")
-            sys.stderr.flush()
+            now = time.time()
+            if now - last_log >= 1.0:
+                sys.stderr.write(f"score: cur={score:.4f} max={max_score:.4f}\n")
+                sys.stderr.flush()
+                last_log = now
+                max_score = 0.0
 
         if score >= args.threshold:
             sys.stdout.write("WAKE\n")

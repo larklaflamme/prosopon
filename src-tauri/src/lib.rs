@@ -9,12 +9,24 @@ mod state_machine;
 use prosopon_client_core::wake_word::WakeWordDetector;
 use prosopon_client_core::webrtc_client::WebRtcClient;
 use state_machine::{ClientState, StateMachine, Transition};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, State,
 };
+
+/// Maximum number of log lines retained in the in-memory ring buffer.
+const MAX_LOGS: usize = 500;
+
+/// A single structured log entry, surfaced to the webview's logs panel.
+#[derive(Clone, serde::Serialize)]
+struct LogEvent {
+    level: String,
+    source: String,
+    message: String,
+}
 
 pub struct AppState {
     machine: Mutex<StateMachine>,
@@ -24,10 +36,32 @@ pub struct AppState {
     /// The running wake-word detector, if any. Held so it stays alive (and
     /// so it can be stopped on disconnect).
     wake_word: Mutex<Option<WakeWordDetector>>,
+    /// Ring buffer of recent log lines, so the webview can backfill on load.
+    logs: Mutex<VecDeque<LogEvent>>,
 }
 
 fn emit_state(app: &AppHandle, state: ClientState) {
     let _ = app.emit("state", state);
+}
+
+/// Emit a structured log line: to the terminal (stderr) and to the webview
+/// (a `log` event), and into the in-memory ring buffer for backfill.
+fn emit_log(app: &AppHandle, level: &str, source: &str, message: impl Into<String>) {
+    let message = message.into();
+    eprintln!("[prosopon] [{source}] {message}");
+    let event = LogEvent {
+        level: level.to_string(),
+        source: source.to_string(),
+        message,
+    };
+    if let Some(state) = app.try_state::<AppState>() {
+        let mut logs = state.logs.lock().unwrap();
+        logs.push_back(event.clone());
+        while logs.len() > MAX_LOGS {
+            logs.pop_front();
+        }
+    }
+    let _ = app.emit("log", event);
 }
 
 /// Load the client config from `client/config.yaml`, trying a few candidate
@@ -115,20 +149,54 @@ async fn send_text(state: State<'_, AppState>, text: String) -> Result<(), Strin
 }
 
 #[tauri::command]
-fn disconnect(app: AppHandle, state: State<AppState>) -> ClientState {
+async fn disconnect(app: AppHandle) -> ClientState {
     eprintln!("[prosopon] disconnect requested");
-    // Drop the WebRTC client so the data channel closes and a later
-    // connect_webrtc starts from a clean slate.
-    *state.webrtc.lock().unwrap() = None;
+    graceful_shutdown(&app).await;
+    app.state::<AppState>().machine.lock().unwrap().current()
+}
+
+/// Gracefully tear down the WebRTC connection and the wake-word detector, then
+/// flip the state machine to `Disconnected`. Shared by the `disconnect` command
+/// and the Ctrl-C / tray-quit shutdown paths.
+///
+/// The key detail: we call `WebRtcClient::close()` (which closes the peer
+/// connection properly) rather than just dropping the client. Dropping the
+/// `Arc<dyn PeerConnection>` tears the connection down abruptly, so the server
+/// never observes a clean close and keeps a stale session alive until its ICE
+/// keepalive times out. A graceful close lets the server's data channel see
+/// `OnClose` and tear down its session immediately.
+async fn graceful_shutdown(app: &AppHandle) {
+    // Close the WebRTC peer connection gracefully.
+    let client = {
+        let state = app.state::<AppState>();
+        let c = state.webrtc.lock().unwrap().take();
+        c
+    };
+    if let Some(client) = client {
+        eprintln!("[prosopon] shutdown: closing webrtc connection");
+        match tokio::time::timeout(std::time::Duration::from_secs(2), client.close()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => eprintln!("[prosopon] shutdown: webrtc close error: {e}"),
+            Err(_) => eprintln!("[prosopon] shutdown: webrtc close timed out"),
+        }
+    }
+
     // Stop the wake-word detector (kills the sidecar + mic capture).
-    if let Some(mut detector) = state.wake_word.lock().unwrap().take() {
+    let detector = {
+        let state = app.state::<AppState>();
+        let d = state.wake_word.lock().unwrap().take();
+        d
+    };
+    if let Some(mut detector) = detector {
         detector.stop();
     }
+
+    // Flip the state machine to Disconnected.
+    let state = app.state::<AppState>();
     let mut machine = state.machine.lock().unwrap();
     if let Some(new_state) = machine.apply(Transition::Disconnect) {
-        emit_state(&app, new_state);
+        emit_state(app, new_state);
     }
-    machine.current()
 }
 
 /// Capture `seconds` of mic audio and report the RMS level + sample count.
@@ -165,28 +233,49 @@ fn record_mic(seconds: f32) -> Result<String, String> {
 /// streams the mic to it, and flips the state machine to `Listening` on each
 /// detection. Idempotent: a second call while already running is a no-op.
 #[tauri::command]
-fn start_wake_word(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+fn start_wake_word(app: AppHandle) -> Result<(), String> {
+    start_wake_word_inner(&app)
+}
+
+/// The shared wake-word startup path, used by both the `start_wake_word`
+/// command and the auto-start hook in `setup`.
+fn start_wake_word_inner(app: &AppHandle) -> Result<(), String> {
     // No-op if already running.
-    if state.wake_word.lock().unwrap().is_some() {
-        eprintln!("[prosopon] start_wake_word: already running");
-        return Ok(());
+    {
+        let state = app.state::<AppState>();
+        if state.wake_word.lock().unwrap().is_some() {
+            emit_log(app, "info", "wake_word", "already running");
+            return Ok(());
+        }
     }
 
     let config = load_client_config();
-    eprintln!(
-        "[prosopon] start_wake_word: model = {}, threshold = {}, sidecar = {}",
-        config.wake_word.model, config.wake_word.threshold, config.wake_word.sidecar_path
+    emit_log(
+        app,
+        "info",
+        "wake_word",
+        format!(
+            "model = {}, threshold = {}, sidecar = {}",
+            config.wake_word.model, config.wake_word.threshold, config.wake_word.sidecar_path
+        ),
     );
 
-    let (detector, wake_rx) = WakeWordDetector::start(&config.wake_word).map_err(|e| {
-        eprintln!("[prosopon] start_wake_word FAILED: {e}");
+    let app_for_log = (*app).clone();
+    let (detector, wake_rx) = WakeWordDetector::start(&config.wake_word, move |line| {
+        emit_log(&app_for_log, "info", "sidecar", line);
+    })
+    .map_err(|e| {
+        emit_log(app, "error", "wake_word", format!("FAILED: {e}"));
         e.to_string()
     })?;
 
-    *state.wake_word.lock().unwrap() = Some(detector);
+    {
+        let state = app.state::<AppState>();
+        *state.wake_word.lock().unwrap() = Some(detector);
+    }
 
     // Background thread: on each wake event, flip Idle -> Listening.
-    let app_handle = app.clone();
+    let app_handle = (*app).clone();
     std::thread::spawn(move || {
         while wake_rx.recv().is_ok() {
             let state = app_handle.state::<AppState>();
@@ -197,8 +286,14 @@ fn start_wake_word(app: AppHandle, state: State<AppState>) -> Result<(), String>
         }
     });
 
-    eprintln!("[prosopon] start_wake_word: listening");
+    emit_log(app, "info", "wake_word", "listening");
     Ok(())
+}
+
+/// Return the buffered log lines, so the webview can backfill on load.
+#[tauri::command]
+fn get_logs(state: State<AppState>) -> Vec<LogEvent> {
+    state.logs.lock().unwrap().iter().cloned().collect()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -208,6 +303,7 @@ pub fn run() {
             machine: Mutex::new(StateMachine::new()),
             webrtc: Mutex::new(None),
             wake_word: Mutex::new(None),
+            logs: Mutex::new(VecDeque::new()),
         })
         .setup(|app| {
             // Tray icon — minimize-to-tray. Requires an icon asset at
@@ -227,10 +323,45 @@ pub fn run() {
                             let _ = window.set_focus();
                         }
                     }
-                    "quit" => app.exit(0),
+                    "quit" => {
+                        let handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            graceful_shutdown(&handle).await;
+                            handle.exit(0);
+                        });
+                    }
                     _ => {}
                 })
                 .build(app)?;
+
+            // Auto-start the wake word so the client is armed from launch
+            // (no manual `start_wake_word` invoke needed).
+            let config = load_client_config();
+            if config.wake_word.auto_start {
+                if let Err(e) = start_wake_word_inner(app.handle()) {
+                    emit_log(
+                        app.handle(),
+                        "error",
+                        "wake_word",
+                        format!("auto-start failed: {e}"),
+                    );
+                }
+            }
+
+            // Install a Ctrl-C (SIGINT) handler so terminating the client from
+            // the command line tears the WebRTC connection down gracefully
+            // instead of dropping it abruptly. If the client is connected, we
+            // close the peer connection (so the server sees a clean close and
+            // doesn't need a restart) before exiting.
+            let app_handle = app.handle().clone();
+            ctrlc::set_handler(move || {
+                let handle = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    graceful_shutdown(&handle).await;
+                    handle.exit(0);
+                });
+            })
+            .expect("failed to install Ctrl-C handler");
 
             Ok(())
         })
@@ -241,7 +372,8 @@ pub fn run() {
             send_text,
             disconnect,
             record_mic,
-            start_wake_word
+            start_wake_word,
+            get_logs
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

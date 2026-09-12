@@ -82,6 +82,10 @@ pub struct WakeWordConfig {
     pub threshold: f32,
     /// Path to the Python sidecar script, relative to the working directory.
     pub sidecar_path: String,
+    /// Whether to start the wake-word listener automatically at app launch.
+    /// When false, it must be started manually via the `start_wake_word`
+    /// command.
+    pub auto_start: bool,
 }
 
 impl Default for WakeWordConfig {
@@ -91,6 +95,7 @@ impl Default for WakeWordConfig {
             model: "hey_jarvis".into(),
             threshold: 0.5,
             sidecar_path: "sidecar/wake_word.py".into(),
+            auto_start: true,
         }
     }
 }
@@ -152,6 +157,7 @@ mod tests {
         assert_eq!(cfg.wake_word.model, "hey_jarvis");
         assert_eq!(cfg.wake_word.threshold, 0.5);
         assert_eq!(cfg.wake_word.python, "python3");
+        assert_eq!(cfg.wake_word.auto_start, true);
     }
 
     #[test]
@@ -177,6 +183,7 @@ wake_word:
   model: "hey_skyte"
   threshold: 0.7
   sidecar_path: "sidecar/wake_word.py"
+  auto_start: false
 "#;
         let cfg = ClientConfig::from_str(yaml).expect("full config should parse");
         assert_eq!(cfg.signaling.url, "http://example:29435/offer");
@@ -185,5 +192,6 @@ wake_word:
         assert_eq!(cfg.wake_word.python, "client/.venv/bin/python");
         assert_eq!(cfg.wake_word.model, "hey_skyte");
         assert_eq!(cfg.wake_word.threshold, 0.7);
+        assert_eq!(cfg.wake_word.auto_start, false);
     }
 }
