@@ -72,3 +72,6 @@ Thumbs.db
 # Local config with secrets (not committed)
 client/config.yaml
 server/config.yaml
+
+# STT sidecar venv (arm64)
+.venv-stt/
