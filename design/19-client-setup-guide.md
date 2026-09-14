@@ -165,12 +165,33 @@ pip install openwakeword     # wake word, MIT — confirm against dscripka/openW
 
 ### 2.6 Models
 
+Two model families are needed, and they are fetched **differently**:
+
+1. **Moonshine (STT)** — the base model is downloaded by the `moonshine`
+   package itself on first use (or via its CLI). No manual step.
+2. **openWakeWord (wake word)** — the pip package ships an **empty**
+   `resources/models/` directory. The `.onnx` models are **not bundled** and
+   must be downloaded explicitly. If you skip this, the wake-word detector
+   fails at runtime with:
+
+   ```
+   onnxruntime.capi.onnxruntime_pybind11_state.NoSuchFile:
+   Load model .../openwakeword/resources/models/hey_jarvis_v0.1.onnx failed
+   ```
+
 ```bash
-# ON: Mac
-mkdir -p ~/prosopon/client/models
-# Moonshine base model + openWakeWord "hey skye" model.
-# Exact URLs from the respective project READMEs.
+# ON: Mac (inside the activated venv — or the prosopon conda env)
+python -c "from openwakeword.utils import download_models; download_models()"
 ```
+
+This fetches the default models (including `hey_jarvis_v0.1.onnx`) into
+`site-packages/openwakeword/resources/models/`. Requires network access.
+
+> **Note:** the model filename is version-sensitive. If the runtime requests a
+> specific name (e.g. `hey_jarvis_v0.1.onnx`) that the downloader didn't fetch,
+> you'll get a *different* `NO_SUCHFILE` even after downloading. In that case,
+> reconcile the requested name against what actually landed in
+> `resources/models/`.
 
 ### 2.7 Client config
 
