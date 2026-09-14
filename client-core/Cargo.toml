@@ -19,6 +19,7 @@ async-trait = "0.1"
 bytes = "1"
 thiserror = "1"
 cpal = "0.15"
+rodio = "0.20"
 
 [dev-dependencies]
 prosopon-server = { path = "../server" }

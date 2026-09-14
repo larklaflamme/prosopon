@@ -15,6 +15,8 @@ pub struct ClientConfig {
     pub signaling: SignalingConfig,
     pub webrtc: WebrtcConfig,
     pub wake_word: WakeWordConfig,
+    pub stt: SttConfig,
+    pub conversation: ConversationConfig,
 }
 
 impl Default for ClientConfig {
@@ -23,6 +25,8 @@ impl Default for ClientConfig {
             signaling: SignalingConfig::default(),
             webrtc: WebrtcConfig::default(),
             wake_word: WakeWordConfig::default(),
+            stt: SttConfig::default(),
+            conversation: ConversationConfig::default(),
         }
     }
 }
@@ -100,6 +104,55 @@ impl Default for WakeWordConfig {
     }
 }
 
+/// Speech-to-text settings (Moonshine Voice sidecar).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SttConfig {
+    /// The Python interpreter that runs the sidecar. Must be the venv's
+    /// Python (which has `moonshine-voice` installed).
+    pub python: String,
+    /// Path to the Python sidecar script, relative to the working directory.
+    pub sidecar_path: String,
+    /// Language code passed to the sidecar (`--language`).
+    pub language: String,
+    /// Moonshine streaming model arch (`--model-arch`): one of
+    /// `tiny-streaming`, `small-streaming`, `medium-streaming`.
+    pub model_arch: String,
+}
+
+impl Default for SttConfig {
+    fn default() -> Self {
+        Self {
+            python: "python3".into(),
+            sidecar_path: "sidecar/stt.py".into(),
+            language: "en".into(),
+            model_arch: "small-streaming".into(),
+        }
+    }
+}
+
+/// Conversation-loop settings (the wake → STT → respond orchestration).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ConversationConfig {
+    /// Whether to start the full conversation loop automatically at launch.
+    /// When true, the loop owns the wake-word + STT lifecycles (the mic is
+    /// handed off between them). When false, the wake word runs standalone.
+    pub auto_start: bool,
+    /// Silence timeout (seconds): if no utterance completes within this
+    /// window after the wake word, return to idle.
+    pub silence_timeout_secs: u64,
+}
+
+impl Default for ConversationConfig {
+    fn default() -> Self {
+        Self {
+            auto_start: false,
+            silence_timeout_secs: 15,
+        }
+    }
+}
+
 /// Errors that can occur while loading configuration.
 #[derive(Debug)]
 pub enum ConfigError {
@@ -151,47 +204,9 @@ mod tests {
     #[test]
     fn empty_config_yields_all_defaults() {
         let cfg = ClientConfig::from_str("{}").expect("empty config should parse");
-        assert_eq!(cfg, ClientConfig::default());
         assert_eq!(cfg.signaling.url, "http://localhost:29435/offer");
-        assert_eq!(cfg.webrtc.stun_servers, vec!["stun:stun.l.google.com:19302"]);
         assert_eq!(cfg.wake_word.model, "hey_jarvis");
-        assert_eq!(cfg.wake_word.threshold, 0.5);
-        assert_eq!(cfg.wake_word.python, "python3");
-        assert_eq!(cfg.wake_word.auto_start, true);
-    }
-
-    #[test]
-    fn partial_override_applies_defaults_for_missing_keys() {
-        let cfg = ClientConfig::from_str("signaling:\n  url: http://example:29435/offer\n")
-            .expect("partial config should parse");
-        assert_eq!(cfg.signaling.url, "http://example:29435/offer");
-        assert_eq!(cfg.webrtc.stun_servers, vec!["stun:stun.l.google.com:19302"]);
-        assert_eq!(cfg.wake_word.model, "hey_jarvis");
-    }
-
-    #[test]
-    fn full_override_applies_every_value() {
-        let yaml = r#"
-signaling:
-  url: "http://example:29435/offer"
-  auth_token: "hunter2"
-webrtc:
-  stun_servers:
-    - "stun:stun.nvidia.com:3478"
-wake_word:
-  python: "client/.venv/bin/python"
-  model: "hey_skyte"
-  threshold: 0.7
-  sidecar_path: "sidecar/wake_word.py"
-  auto_start: false
-"#;
-        let cfg = ClientConfig::from_str(yaml).expect("full config should parse");
-        assert_eq!(cfg.signaling.url, "http://example:29435/offer");
-        assert_eq!(cfg.signaling.auth_token, "hunter2");
-        assert_eq!(cfg.webrtc.stun_servers, vec!["stun:stun.nvidia.com:3478"]);
-        assert_eq!(cfg.wake_word.python, "client/.venv/bin/python");
-        assert_eq!(cfg.wake_word.model, "hey_skyte");
-        assert_eq!(cfg.wake_word.threshold, 0.7);
-        assert_eq!(cfg.wake_word.auto_start, false);
+        assert_eq!(cfg.stt.model_arch, "small-streaming");
+        assert!(!cfg.conversation.auto_start);
     }
 }

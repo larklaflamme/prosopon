@@ -19,7 +19,9 @@ pub mod config;
 pub mod signaling;
 pub mod mic;
 pub mod wake_word;
+pub mod stt;
 pub mod webrtc_client;
+pub mod playback;
 
 use thiserror::Error;
 

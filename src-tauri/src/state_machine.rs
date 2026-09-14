@@ -67,6 +67,9 @@ pub enum Transition {
     UtteranceComplete,
     ResponseStarted,
     ResponseComplete,
+    /// Abort an in-flight listen/think and return to idle (e.g. silence
+    /// timeout, or a send/receive error). Legal from Listening or Thinking.
+    Cancel,
     ToggleMute,
     SetMute(bool),
 }
@@ -134,6 +137,12 @@ impl StateMachine {
                     return None;
                 }
             }
+            Transition::Cancel => {
+                match self.current.state {
+                    State::Listening | State::Thinking => State::Idle,
+                    _ => return None,
+                }
+            }
             Transition::ToggleMute => {
                 self.current.muted = !self.current.muted;
                 return Some(self.current);
@@ -186,6 +195,34 @@ mod tests {
 
         assert!(m.apply(Transition::ResponseComplete).is_some());
         assert_eq!(m.current().state, State::Idle);
+    }
+
+    #[test]
+    fn cancel_from_listening_returns_to_idle() {
+        let mut m = StateMachine::new();
+        m.apply(Transition::Connect);
+        m.apply(Transition::WakeWord);
+        assert_eq!(m.current().state, State::Listening);
+        assert!(m.apply(Transition::Cancel).is_some());
+        assert_eq!(m.current().state, State::Idle);
+    }
+
+    #[test]
+    fn cancel_from_thinking_returns_to_idle() {
+        let mut m = StateMachine::new();
+        m.apply(Transition::Connect);
+        m.apply(Transition::WakeWord);
+        m.apply(Transition::UtteranceComplete);
+        assert_eq!(m.current().state, State::Thinking);
+        assert!(m.apply(Transition::Cancel).is_some());
+        assert_eq!(m.current().state, State::Idle);
+    }
+
+    #[test]
+    fn cancel_is_illegal_from_idle() {
+        let mut m = StateMachine::new();
+        m.apply(Transition::Connect);
+        assert!(m.apply(Transition::Cancel).is_none());
     }
 
     #[test]

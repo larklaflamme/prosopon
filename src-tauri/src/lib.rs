@@ -6,6 +6,7 @@
 
 mod state_machine;
 
+use prosopon_client_core::stt::SttDetector;
 use prosopon_client_core::wake_word::WakeWordDetector;
 use prosopon_client_core::webrtc_client::WebRtcClient;
 use state_machine::{ClientState, StateMachine, Transition};
@@ -290,6 +291,197 @@ fn start_wake_word_inner(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Start the full voice loop: wake word → STT → send → receive → play →
+/// repeat. This is the bridge that ties the two sides together.
+///
+/// The loop owns the wake-word and STT detector lifecycles so the mic is
+/// handed off cleanly between them (only one detector can own the mic at a
+/// time). It runs on a background thread and loops until the process exits.
+#[tauri::command]
+fn start_conversation(app: AppHandle) -> Result<(), String> {
+    // Stop any standalone wake-word detector first — the loop owns it now.
+    let detector = {
+        let state = app.state::<AppState>();
+        let d = state.wake_word.lock().unwrap().take();
+        d
+    };
+    if let Some(mut d) = detector {
+        d.stop();
+    }
+    run_conversation_loop(app);
+    Ok(())
+}
+
+/// The conversation loop body. Spawned on a dedicated thread by
+/// `start_conversation` (or auto-started from `setup`).
+fn run_conversation_loop(app: AppHandle) {
+    std::thread::spawn(move || {
+        let config = load_client_config();
+        let silence_timeout = std::time::Duration::from_secs(config.conversation.silence_timeout_secs);
+
+        loop {
+            // --- 1. Wake word ---
+            let app_for_log = app.clone();
+            let (detector, wake_rx) = match WakeWordDetector::start(&config.wake_word, move |line| {
+                emit_log(&app_for_log, "info", "wake_word", line);
+            }) {
+                Ok(x) => x,
+                Err(e) => {
+                    emit_log(&app, "error", "conversation", format!("wake word failed: {e}"));
+                    return;
+                }
+            };
+            emit_log(&app, "info", "conversation", "listening for wake word");
+
+            // Block until a wake event.
+            if wake_rx.recv().is_err() {
+                return; // detector stopped
+            }
+            emit_log(&app, "info", "conversation", "wake word detected");
+            {
+                let state = app.state::<AppState>();
+                let mut machine = state.machine.lock().unwrap();
+                if let Some(s) = machine.apply(Transition::WakeWord) {
+                    emit_state(&app, s);
+                }
+            }
+
+            // Stop the wake word to free the mic for STT.
+            let mut detector = detector;
+            detector.stop();
+
+            // --- 2. STT ---
+            let app_for_log = app.clone();
+            let (stt, stt_rx) = match SttDetector::start(&config.stt, move |line| {
+                emit_log(&app_for_log, "info", "stt", line);
+            }) {
+                Ok(x) => x,
+                Err(e) => {
+                    emit_log(&app, "error", "conversation", format!("STT failed: {e}"));
+                    cancel_to_idle(&app);
+                    continue;
+                }
+            };
+            emit_log(&app, "info", "conversation", "listening for utterance");
+
+            // Wait for a completed utterance (with a silence timeout).
+            let text = match stt_rx.recv_timeout(silence_timeout) {
+                Ok(t) => t,
+                Err(_) => {
+                    emit_log(&app, "info", "conversation", "utterance timeout (silence)");
+                    let mut stt = stt;
+                    stt.stop();
+                    cancel_to_idle(&app);
+                    continue;
+                }
+            };
+            let mut stt = stt;
+            stt.stop();
+            emit_log(&app, "info", "conversation", format!("utterance: {text}"));
+
+            // --- 3. Send + receive ---
+            {
+                let state = app.state::<AppState>();
+                let mut machine = state.machine.lock().unwrap();
+                if let Some(s) = machine.apply(Transition::UtteranceComplete) {
+                    emit_state(&app, s);
+                }
+            }
+
+            let client = {
+                let state = app.state::<AppState>();
+                let c = state.webrtc.lock().unwrap().as_ref().cloned();
+                c
+            };
+            let Some(client) = client else {
+                emit_log(&app, "error", "conversation", "not connected");
+                cancel_to_idle(&app);
+                continue;
+            };
+
+            // send_text + recv_audio are async; run them on the Tauri runtime
+            // and hand the result back over a channel.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let client_for_task = client.clone();
+            let text_for_task = text.clone();
+            tauri::async_runtime::spawn(async move {
+                let result = async {
+                    client_for_task.send_text(&text_for_task).await?;
+                    client_for_task.recv_audio().await
+                }
+                .await;
+                let _ = tx.send(result);
+            });
+
+            let audio = match rx.recv() {
+                Ok(r) => r,
+                Err(_) => {
+                    emit_log(&app, "error", "conversation", "async task dropped");
+                    cancel_to_idle(&app);
+                    continue;
+                }
+            };
+
+            match audio {
+                Ok(bytes) => {
+                    emit_log(
+                        &app,
+                        "info",
+                        "conversation",
+                        format!("received {} bytes of audio", bytes.len()),
+                    );
+                    {
+                        let state = app.state::<AppState>();
+                        let mut machine = state.machine.lock().unwrap();
+                        if let Some(s) = machine.apply(Transition::ResponseStarted) {
+                            emit_state(&app, s);
+                        }
+                    }
+                    // --- 4. Play ---
+                    play_audio(&app, &bytes);
+                    {
+                        let state = app.state::<AppState>();
+                        let mut machine = state.machine.lock().unwrap();
+                        if let Some(s) = machine.apply(Transition::ResponseComplete) {
+                            emit_state(&app, s);
+                        }
+                    }
+                }
+                Err(e) => {
+                    emit_log(&app, "error", "conversation", format!("receive failed: {e}"));
+                    cancel_to_idle(&app);
+                }
+            }
+            // loop back to the wake word
+        }
+    });
+}
+
+/// Return the state machine to Idle after an aborted listen/think.
+fn cancel_to_idle(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let mut machine = state.machine.lock().unwrap();
+    if let Some(s) = machine.apply(Transition::Cancel) {
+        emit_state(app, s);
+    }
+}
+
+/// Play the WAV response audio.
+///
+/// Decodes the WAV bytes from the server and plays them on the default
+/// output device via rodio (hound). Blocks until playback completes.
+fn play_audio(app: &AppHandle, bytes: &[u8]) {
+    match prosopon_client_core::playback::play_wav(bytes) {
+        Ok(()) => emit_log(
+            app,
+            "info",
+            "playback",
+            format!("played {} bytes of audio", bytes.len()),
+        ),
+        Err(e) => emit_log(app, "error", "playback", format!("playback failed: {e}")),
+    }
+}
+
 /// Return the buffered log lines, so the webview can backfill on load.
 #[tauri::command]
 fn get_logs(state: State<AppState>) -> Vec<LogEvent> {
@@ -334,10 +526,13 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Auto-start the wake word so the client is armed from launch
-            // (no manual `start_wake_word` invoke needed).
+            // Auto-start: prefer the full conversation loop; fall back to the
+            // standalone wake word if conversation mode is off.
             let config = load_client_config();
-            if config.wake_word.auto_start {
+            if config.conversation.auto_start {
+                emit_log(app.handle(), "info", "conversation", "auto-starting conversation loop");
+                run_conversation_loop(app.handle().clone());
+            } else if config.wake_word.auto_start {
                 if let Err(e) = start_wake_word_inner(app.handle()) {
                     emit_log(
                         app.handle(),
@@ -373,6 +568,7 @@ pub fn run() {
             disconnect,
             record_mic,
             start_wake_word,
+            start_conversation,
             get_logs
         ])
         .run(tauri::generate_context!())
