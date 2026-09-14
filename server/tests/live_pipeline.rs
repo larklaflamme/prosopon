@@ -1,6 +1,6 @@
 //! Live pipeline test (Slice 4).
 //!
-//! Runs the full text → cognition → TTS → Ogg Opus pipeline against the
+//! Runs the full text → cognition → TTS → WAV pipeline against the
 //! running Ollama + Kokoro services. Gated behind `--features live-tests`.
 
 use prosopon_server::cognition::ChatMessage;
@@ -8,7 +8,7 @@ use prosopon_server::config::Config;
 use prosopon_server::pipeline::Pipeline;
 
 #[tokio::test]
-async fn pipeline_returns_reply_and_ogg_opus() {
+async fn pipeline_returns_reply_and_wav() {
     let config = Config::default();
     let pipeline = Pipeline::new(&config);
 
@@ -18,11 +18,8 @@ async fn pipeline_returns_reply_and_ogg_opus() {
     // Reply text is non-empty.
     assert!(!output.reply.trim().is_empty(), "reply should be non-empty");
 
-    // Audio is a valid Ogg Opus stream: OggS magic + OpusHead page.
-    assert!(output.audio.len() > 4, "audio should not be empty");
-    assert_eq!(&output.audio[0..4], b"OggS", "audio should start with OggS");
-    assert!(
-        output.audio.windows(8).any(|w| w == b"OpusHead"),
-        "audio should contain an OpusHead page"
-    );
+    // Audio is a valid WAV stream: RIFF magic + WAVE form type.
+    assert!(output.audio.len() > 12, "audio should not be empty");
+    assert_eq!(&output.audio[0..4], b"RIFF", "audio should start with RIFF");
+    assert_eq!(&output.audio[8..12], b"WAVE", "audio should be a WAVE stream");
 }

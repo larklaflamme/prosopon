@@ -3,7 +3,7 @@
 //! Loads `config.yaml`, builds the voice-loop pipeline, and serves the HTTP
 //! signaling endpoint (Option B). The client POSTs its SDP offer to `/offer`,
 //! receives the answer, and the data channel carries text (client → server)
-//! and Ogg Opus audio (server → client).
+//! and WAV audio (server → client).
 //!
 //! Each offer gets a *fresh* peer connection (built inside the signaling
 //! handler), so the server can serve multiple sequential clients rather than

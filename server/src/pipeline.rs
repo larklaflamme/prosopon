@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! text (conversation history) → cognition (Ollama) → reply text
-//!                              → TTS (Kokoro)      → Ogg Opus bytes
+//!                              → TTS (Kokoro)      → WAV bytes
 //! ```
 //!
 //! The pipeline is **stateless** by design (Lark's decision, 2026-09-02):
@@ -17,12 +17,12 @@ use crate::config::Config;
 use crate::tts::{TtsClient, TtsError};
 
 /// The result of one pipeline turn: the assistant's reply text and its
-/// synthesized Ogg Opus audio.
+/// synthesized WAV audio.
 #[derive(Debug)]
 pub struct PipelineOutput {
     /// The assistant's reply text (from cognition).
     pub reply: String,
-    /// The full Ogg Opus stream (header + tags + audio pages) for `reply`.
+    /// The full WAV stream for `reply`.
     pub audio: Vec<u8>,
 }
 

@@ -1,18 +1,18 @@
 //! WebRTC data-channel server (Slice 5).
 //!
-//! Under Option B (Lark's decision, 2026-09-02): the server ships Ogg Opus
+//! Under Option B (Lark's decision, 2026-09-02): the server ships WAV
 //! bytes as-is over the WebRTC **data channel** — no audio track, no
-//! transcoding, no demuxing. The client plays the Ogg Opus natively.
+//! transcoding, no demuxing. The client plays the WAV natively.
 //!
 //! The server accepts one peer. The client creates the data channel; the
 //! server receives it via `on_data_channel`, polls it for text messages,
 //! runs each through the pipeline (cognition + TTS), and sends the resulting
-//! Ogg Opus bytes back over the same channel.
+//! WAV bytes back over the same channel.
 //!
 //! ## Audio chunking (2026-09-02)
 //!
 //! The SCTP data channel's default max message size is 64 KiB (RFC 8841).
-//! Kokoro's Ogg Opus output for a typical sentence is ~76 KiB (measured
+//! Kokoro's WAV output for a typical sentence is larger than Opus (measured
 //! 2026-09-02), which exceeds that limit. We therefore chunk the audio into
 //! 16 KiB pieces and reassemble on the client.
 //!
@@ -46,7 +46,7 @@ use webrtc::peer_connection::{
 /// Maximum size of a single audio chunk sent over the data channel.
 const AUDIO_CHUNK_SIZE: usize = 16 * 1024;
 
-/// Send an Ogg Opus audio buffer over the data channel as a length-prefixed
+/// Send an audio buffer over the data channel as a length-prefixed
 /// sequence of chunks: a text header `audio:<total_bytes>` followed by binary
 /// chunks. The channel is ordered and reliable, so the client reassembles by
 /// concatenation.
