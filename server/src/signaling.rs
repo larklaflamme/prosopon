@@ -24,7 +24,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use webrtc::peer_connection::{RTCIceCandidateInit, RTCSessionDescription};
+use webrtc::peer_connection::{RTCIceCandidateInit, RTCPeerConnectionState, RTCSessionDescription};
 
 use crate::config::WebrtcConfig;
 use crate::pipeline::Pipeline;
@@ -53,6 +53,27 @@ pub struct SignalingState {
     pipeline: Arc<Pipeline>,
     auth_token: String,
     sessions: Mutex<Vec<Arc<WebRtcServer>>>,
+}
+
+impl SignalingState {
+    /// Drop sessions whose peer connection has permanently ended.
+    ///
+    /// A session is dead when its connection state is `Closed` (we closed it)
+    /// or `Failed` (the remote peer went away and ICE could not recover).
+    /// `Disconnected` is deliberately *not* pruned: it is a transient state
+    /// that ICE may recover from automatically, and pruning it would kill a
+    /// live session during a brief network blip.
+    fn prune_dead_sessions(&self) {
+        self.sessions
+            .lock()
+            .unwrap()
+            .retain(|server| {
+                !matches!(
+                    server.connection_state(),
+                    RTCPeerConnectionState::Closed | RTCPeerConnectionState::Failed
+                )
+            });
+    }
 }
 
 /// Build the signaling router: `POST /offer` → answer.
@@ -131,7 +152,9 @@ async fn handle_offer(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Retain the connection so its data channel stays alive for the session.
+    // Prune sessions whose peer connection has ended, then retain the new
+    // connection so its data channel stays alive for the session.
+    state.prune_dead_sessions();
     state.sessions.lock().unwrap().push(server);
 
     Ok(Json(answer))

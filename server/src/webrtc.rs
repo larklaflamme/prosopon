@@ -40,7 +40,7 @@ use webrtc::data_channel::{DataChannel, DataChannelEvent};
 use webrtc::peer_connection::{
     PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
     RTCIceCandidateInit, RTCIceGatheringState, RTCIceServer, RTCPeerConnectionIceEvent,
-    RTCSessionDescription,
+    RTCPeerConnectionState, RTCSessionDescription,
 };
 
 /// Maximum size of a single audio chunk sent over the data channel.
@@ -81,6 +81,7 @@ impl Default for IceState {
 struct Handler {
     pipeline: Arc<Pipeline>,
     ice: Arc<IceState>,
+    connection_state: Arc<Mutex<RTCPeerConnectionState>>,
 }
 
 #[async_trait::async_trait]
@@ -95,6 +96,10 @@ impl PeerConnectionEventHandler for Handler {
         if state == RTCIceGatheringState::Complete {
             *self.ice.gathering_complete.lock().unwrap() = true;
         }
+    }
+
+    async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
+        *self.connection_state.lock().unwrap() = state;
     }
 
     async fn on_data_channel(&self, data_channel: Arc<dyn DataChannel>) {
@@ -134,6 +139,7 @@ impl PeerConnectionEventHandler for Handler {
 pub struct WebRtcServer {
     pc: Arc<dyn PeerConnection>,
     ice: Arc<IceState>,
+    connection_state: Arc<Mutex<RTCPeerConnectionState>>,
 }
 
 impl WebRtcServer {
@@ -145,9 +151,11 @@ impl WebRtcServer {
         pipeline: Arc<Pipeline>,
     ) -> webrtc::error::Result<Self> {
         let ice = Arc::new(IceState::default());
+        let connection_state = Arc::new(Mutex::new(RTCPeerConnectionState::New));
         let handler = Arc::new(Handler {
             pipeline,
             ice: ice.clone(),
+            connection_state: connection_state.clone(),
         });
         let ice_servers = config
             .stun_servers
@@ -169,7 +177,15 @@ impl WebRtcServer {
         Ok(Self {
             pc: Arc::new(pc),
             ice,
+            connection_state,
         })
+    }
+
+    /// The peer connection's current state, tracked via
+    /// `on_connection_state_change`. Used by the signaling layer to prune
+    /// dead sessions.
+    pub fn connection_state(&self) -> RTCPeerConnectionState {
+        *self.connection_state.lock().unwrap()
     }
 
     /// Answer an offer: set the remote description, add the client's ICE
