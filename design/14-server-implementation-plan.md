@@ -80,8 +80,9 @@ server/
     main.rs                # entry: load config, start WebRTC server
     config.rs              # config.yaml loader (serde_yaml), defaults
     tts.rs                 # Kokoro HTTP client (streaming)
-    cognition.rs           # Ollama HTTP client (chat)
-    pipeline.rs            # text → cognition → TTS → audio chunks
+    cognition.rs           # Ollama HTTP client (chat + tool calling)
+    web_search.rs          # Tavily/Brave search client (normalized results)
+    pipeline.rs            # agent loop: cognition ↔ web search → TTS → audio
     webrtc.rs              # WebRTC server: data channel in, Ogg Opus bytes out
     signaling.rs           # HTTP SDP offer/answer endpoint (Option B)
     main.rs                # binary: config -> pipeline -> webrtc -> axum serve
@@ -103,10 +104,13 @@ channel).
 Each slice is independently testable and lands a working artifact.
 
 ### Slice 1 — `config.rs` (no infra needed)
-- Struct `Config { tts: TtsConfig, cognition: CognitionConfig, webrtc: WebrtcConfig }`.
+- Struct `Config { tts: TtsConfig, cognition: CognitionConfig, webrtc: WebrtcConfig, signaling: SignalingConfig, web_search: WebSearchConfig }`.
 - `TtsConfig { base_url, model, voice }` — voice defaults to `af_heart`.
 - `CognitionConfig { base_url, model }` — model defaults to `qwen2.5:3b` (fast-but-dumb; swappable).
 - `WebrtcConfig { listen_port }` — defaults to `29434`.
+- `WebSearchConfig { provider, tavily_api_key, brave_api_key }` — `provider`
+  reads the `use` key (`"tavily"` or `"brave"`, default `"tavily"`); the API
+  keys read `TAVILY_API_KEY` / `BRAVE_API_KEY` (uppercase, via `#[serde(rename)]`).
 - **Test:** unit test parses a sample `config.yaml`, asserts defaults apply
   when keys are absent, asserts overrides apply when present.
 
@@ -118,7 +122,7 @@ Each slice is independently testable and lands a working artifact.
 - **Test (live, gated):** synthesize a fixed sentence, assert non-empty,
   assert `OggS` magic bytes + `OpusHead` present. **Passes live.**
 
-### Slice 3 — `cognition.rs` (live Ollama)
+### Slice 3 — `cognition.rs` (live Ollama) ✅ DONE (+ tool calling)
 - `CognitionClient::chat(history: &[Message]) -> String`.
 - POSTs to `/api/chat` with `stream: false` (M0: simplest correct path).
 - Sends `think: false` at the TOP LEVEL of the request body (not in `options`) —
@@ -126,11 +130,26 @@ Each slice is independently testable and lands a working artifact.
 - **Test (live, gated):** send a fixed prompt, assert non-empty response,
   assert `done_reason == "stop"`.
 
-### Slice 4 — `pipeline.rs` (both, no WebRTC yet)
-- `Pipeline::respond(text) -> impl Stream<Item = AudioChunk>`.
+**Tool calling (2026-09-14):** added `chat_with_tools(messages, tools)` —
+offers the model a set of `Tool`s (each a JSON-schema `function`) via Ollama's
+native function-calling. When the model requests a tool, the reply carries
+`tool_calls` (name + arguments) instead of a final answer; the caller executes
+the tool and feeds the result back as a `tool`-role message. `ChatMessage`
+grew a `tool_calls` field (assistant messages only) and a `tool` constructor.
+
+### Slice 4 — `pipeline.rs` (both, no WebRTC yet) ✅ DONE (+ agent loop)
+- `Pipeline::run(history: &[ChatMessage]) -> PipelineOutput { reply, audio }`.
 - Chains: text → cognition → response text → TTS → audio chunks.
 - **Test (live, gated):** "Say hello" → assert audio comes back, measure
   end-to-end latency (cognition + TTS, no transport).
+
+**Agent loop (2026-09-14):** the pipeline is still **stateless** — the caller
+owns the history and passes the full message list each turn. But a single turn
+is now an *agent loop*: prepend a system prompt, offer the model a `web_search`
+tool, and if it requests a search, execute it (Tavily/Brave), feed the results
+back as a `tool` message, and re-query — bounded to `MAX_TOOL_ROUNDS = 3`.
+The system prompt frames Skye's persona and *when* to search (current events /
+uncertain facts), and instructs her never to mention the tool itself.
 
 ### Slice 5 — `webrtc.rs` (transport) ✅ DONE (module + unit test)
 - WebRTC server: accepts one peer, exposes a data channel carrying text
@@ -245,6 +264,14 @@ changes, no rebuild.
   forwarding (chunk-by-chunk over the data channel) is a later optimization.
 - **Cognition streaming:** M0 uses `stream: false` (simplest). Streaming
   cognition (token-by-token) is a later optimization, not M0.
+- **Web search provider:** resolved (2026-09-14) — config-driven via
+  `web_search.use` (`"tavily"` or `"brave"`), normalized to a common
+  `SearchResult` so the pipeline is provider-agnostic.
+- **Conversational context:** resolved (2026-09-14) — per-session history
+  lives in the `on_data_channel` spawned task (each data channel = one session).
+- **Session pruning:** resolved (2026-09-14) — `signaling.rs` prunes
+  `Closed`/`Failed` peer connections on each offer; `Disconnected` is kept
+  (transient, ICE may recover). A background prune task is a later optimization.
 
 ---
 

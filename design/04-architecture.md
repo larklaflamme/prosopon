@@ -1,12 +1,14 @@
 # 04 — Architecture & Decisions
 
-> **Updated 2026-09-11** (Skye) — reflects the *implemented* system, not the
-> original 2026-09-01 sketch. Two things changed materially since the first
+> **Updated 2026-09-14** (Skye) — reflects the *implemented* system, not the
+> original 2026-09-01 sketch. Four things changed materially since the first
 > draft: (1) transport moved from SSH tunneling to **HTTP signaling (Option B —
-> SDP offer/answer exchange)**, and (2) the wake word is now a **Python sidecar
+> SDP offer/answer exchange)**, (2) the wake word is now a **Python sidecar
 > (openWakeWord)** running the bundled `hey_jarvis` model as a placeholder for
-> the eventual custom "Hey Skye" model. Everything below is grounded in the
-> actual source on disk.
+> the eventual custom "Hey Skye" model, (3) cognition is now an **agent loop**
+> with **per-session conversational context** and **web search** (Tavily or
+> Brave), and (4) the signaling layer **prunes dead WebRTC sessions**. Everything
+> below is grounded in the actual source on disk.
 
 ## The shape of the system
 
@@ -121,13 +123,22 @@ The data channel is ordered and reliable. Two message kinds:
   `ceil(total_bytes / 16 KiB)` binary messages carrying the Ogg Opus chunks.
   The client reassembles by concatenation.
 
+**Conversational context (2026-09-14):** each data channel is one client
+session, so the server's `on_data_channel` handler spawns a task that owns a
+`Vec<ChatMessage>` history for that channel. Every incoming utterance is
+appended as a `user` message, the pipeline runs against the *full* history, and
+the assistant reply is appended back — so the next turn sees everything that
+came before. The history lives in the spawned task and accumulates across
+turns; it is dropped when the peer connection closes.
+
 ## Where each component runs
 
 | Component | Runs on | How | Why |
 |-----------|---------|-----|-----|
 | Wake word | Client | openWakeWord **Python sidecar** (stdio) | Mic is on the client; must be always-on locally |
 | STT (Moonshine) | Client | **Python sidecar** → sherpa-onnx | Streaming, latency-first: instant reaction |
-| Cognition (Skye) | Server | Ollama (HTTP, `qwen2.5:3b`) | That's where Skye is |
+| Cognition (Skye) | Server | Ollama (HTTP, `qwen2.5:3b`) + **agent loop** | That's where Skye is; tool-calling loop for web search |
+| Web search | Server | Tavily or Brave (HTTP, `web_search.use`) | On-demand facts/current events, provider-agnostic via `web_search.rs` |
 | TTS (Kokoro) | Server | **Python sidecar** (HTTP, `af_heart`) | Skye's voice lives with Skye; one voice for all clients |
 | Signaling | Server | axum HTTP (`/offer`) | SDP offer/answer + ICE candidate exchange |
 | Transport | Both | webrtc-rs data channel | P2P between the two binaries |
@@ -165,7 +176,10 @@ Lark speaks ──► Mac mic ──► wake word ("hey_jarvis") ──► audio
 1. **Incoming (client)**: mic → wake-word gate → audio buffer.
 2. **STT (client)**: Moonshine streams the utterance → text.
 3. **Transport**: text → WebRTC data channel → server.
-4. **Cognition (server)**: text → Ollama → response text.
+4. **Cognition (server)**: text → Ollama → response text. This is now an
+   **agent loop**: the model is offered a `web_search` tool; if it requests a
+   search, the server executes it (Tavily/Brave), feeds the results back, and
+   re-queries — bounded to 3 tool rounds per turn.
 5. **Outgoing (server)**: response text → Kokoro TTS → Ogg Opus (streamed).
 6. **Transport**: audio → WebRTC data channel (chunked) → client.
 7. **Playback (client)**: audio → speaker.
@@ -214,16 +228,21 @@ renderer is not.
 | STT | Moonshine (client-side) | MIT, streaming-native, instant reaction |
 | STT integration | Python sidecar → sherpa-onnx | Unblock fast, then consolidate to Rust |
 | TTS | Kokoro-82M (server-side) | Apache-2.0, 82M, CPU-fast, high quality |
-| Cognition | Ollama (`qwen2.5:3b`) | Local, fast, no external API dependency |
+| Cognition | Ollama (`qwen2.5:3b`) + agent loop | Local, fast; tool-calling loop adds web search without leaving Ollama |
+| Web search | Tavily or Brave (`web_search.use`) | Config-driven provider; normalized results, provider-agnostic pipeline |
 | Signaling | HTTP (Option B — SDP offer/answer) | Single round-trip carries offer + candidates; fresh `pc` per offer |
 | Transport | WebRTC data channel (webrtc-rs) | P2P, low-latency, full-duplex |
 | Auth | Bearer token (constant-time check) | Shared secret; empty = dev mode |
 
-## Current frontier — streaming orchestration
+## Current frontier — agent functionality
 
-The next work is the **two-tier response + streaming glue** for the Monday
-demo: begin TTS on the first sentence while the LLM is still generating the
-rest, so the response *starts* within a few hundred ms of the query ending.
-See `20-streaming-orchestration.md` for the design. The wake word, mic, STT
-sidecar, TTS sidecar, and WebRTC transport are all done; the orchestration
-and streaming overlap are the new pieces.
+Voice is end-to-end working. The recent work (2026-09-14) landed the **agent
+layer**: per-session conversational context, config-driven **web search**
+(Tavily/Brave), and a bounded **tool-calling loop** in the pipeline, plus
+**session pruning** in the signaling layer (dead `Closed`/`Failed` peer
+connections are dropped on each offer; `Disconnected` is deliberately kept
+because ICE may recover it). See `14-server-implementation-plan.md` for the
+slice-by-slice detail. Remaining candidates: a background prune task (free
+resources on idle disconnect without waiting for the next offer), and
+streaming cognition (token-by-token) — both later optimizations, not
+correctness requirements.
