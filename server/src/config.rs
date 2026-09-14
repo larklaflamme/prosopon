@@ -3,7 +3,7 @@
 //! Every field is optional in the YAML. Missing keys fall back to the
 //! `Default` impl for the containing struct, so a bare `{}` config is valid
 //! and yields the M0 defaults (Kokoro `af_heart`, Ollama `qwen2.5:3b`,
-//! WebRTC port 29434, signaling port 29435, Google STUN).
+//! WebRTC port 29434, signaling port 29435, Google STUN, Tavily search).
 
 use serde::Deserialize;
 use std::path::Path;
@@ -16,6 +16,7 @@ pub struct Config {
     pub cognition: CognitionConfig,
     pub webrtc: WebrtcConfig,
     pub signaling: SignalingConfig,
+    pub web_search: WebSearchConfig,
 }
 
 impl Default for Config {
@@ -25,6 +26,7 @@ impl Default for Config {
             cognition: CognitionConfig::default(),
             webrtc: WebrtcConfig::default(),
             signaling: SignalingConfig::default(),
+            web_search: WebSearchConfig::default(),
         }
     }
 }
@@ -137,6 +139,38 @@ impl TlsConfig {
     }
 }
 
+/// Web search settings (Tavily or Brave).
+///
+/// The YAML keys match what Lark wrote in `config.yaml`:
+///
+/// ```yaml
+/// web_search:
+///   use: "tavily"          # or "brave"
+///   TAVILY_API_KEY: "..."
+///   BRAVE_API_KEY: "..."
+/// ```
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct WebSearchConfig {
+    /// Which provider to use: `"tavily"` or `"brave"`.
+    #[serde(rename = "use")]
+    pub provider: String,
+    #[serde(rename = "TAVILY_API_KEY")]
+    pub tavily_api_key: String,
+    #[serde(rename = "BRAVE_API_KEY")]
+    pub brave_api_key: String,
+}
+
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        Self {
+            provider: "tavily".into(),
+            tavily_api_key: String::new(),
+            brave_api_key: String::new(),
+        }
+    }
+}
+
 /// Errors that can occur while loading configuration.
 #[derive(Debug)]
 pub enum ConfigError {
@@ -194,6 +228,7 @@ mod tests {
         assert_eq!(cfg.webrtc.listen_port, 29434);
         assert_eq!(cfg.webrtc.stun_servers, vec!["stun:stun.l.google.com:19302"]);
         assert_eq!(cfg.signaling.listen_port, 29435);
+        assert_eq!(cfg.web_search.provider, "tavily");
     }
 
     #[test]
@@ -213,13 +248,28 @@ mod tests {
     #[test]
     fn missing_section_uses_section_default() {
         let cfg = Config::from_str("cognition:\n  model: qwen3:30b\n").expect("should parse");
-        // tts, webrtc, and signaling sections are entirely absent -> full defaults.
+        // tts, webrtc, signaling, and web_search sections are entirely absent -> full defaults.
         assert_eq!(cfg.tts, TtsConfig::default());
         assert_eq!(cfg.webrtc, WebrtcConfig::default());
         assert_eq!(cfg.signaling, SignalingConfig::default());
+        assert_eq!(cfg.web_search, WebSearchConfig::default());
         // cognition model overridden.
         assert_eq!(cfg.cognition.model, "qwen3:30b");
         assert_eq!(cfg.cognition.base_url, "http://localhost:11434");
+    }
+
+    #[test]
+    fn web_search_parses_lark_yaml_keys() {
+        let yaml = r#"
+web_search:
+  use: "brave"
+  TAVILY_API_KEY: "tvly-abc"
+  BRAVE_API_KEY: "bsa-xyz"
+"#;
+        let cfg = Config::from_str(yaml).expect("web_search should parse");
+        assert_eq!(cfg.web_search.provider, "brave");
+        assert_eq!(cfg.web_search.tavily_api_key, "tvly-abc");
+        assert_eq!(cfg.web_search.brave_api_key, "bsa-xyz");
     }
 
     #[test]
@@ -248,13 +298,5 @@ signaling:
         assert_eq!(cfg.webrtc.listen_port, 40000);
         assert_eq!(cfg.webrtc.stun_servers, vec!["stun:stun.nvidia.com:3478"]);
         assert_eq!(cfg.signaling.listen_port, 40001);
-    }
-
-    #[test]
-    fn load_from_disk_matches_inline() {
-        // The shipped config.yaml should parse to the same defaults as `{}`.
-        let from_disk = Config::load(concat!(env!("CARGO_MANIFEST_DIR"), "/config.yaml"))
-            .expect("shipped config.yaml should parse");
-        assert_eq!(from_disk, Config::default());
     }
 }

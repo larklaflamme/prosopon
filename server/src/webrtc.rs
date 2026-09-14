@@ -100,13 +100,18 @@ impl PeerConnectionEventHandler for Handler {
     async fn on_data_channel(&self, data_channel: Arc<dyn DataChannel>) {
         let pipeline = self.pipeline.clone();
         tokio::spawn(async move {
+            // Per-session conversational history. Each data channel is one
+            // client session, so the history lives here and accumulates
+            // across turns (user + assistant messages).
+            let mut history: Vec<ChatMessage> = Vec::new();
             while let Some(event) = data_channel.poll().await {
                 match event {
                     DataChannelEvent::OnMessage(msg) => {
                         let text = String::from_utf8_lossy(&msg.data).to_string();
-                        let messages = vec![ChatMessage::user(text)];
-                        match pipeline.run(&messages).await {
+                        history.push(ChatMessage::user(text));
+                        match pipeline.run(&history).await {
                             Ok(out) => {
+                                history.push(ChatMessage::assistant(out.reply.clone()));
                                 if let Err(e) = send_audio(&data_channel, &out.audio).await {
                                     eprintln!("failed to send audio over data channel: {e}");
                                 }

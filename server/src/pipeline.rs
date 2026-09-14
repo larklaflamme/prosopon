@@ -1,20 +1,39 @@
 //! End-to-end pipeline (Slice 4).
 //!
-//! Composes the two HTTP clients into a single voice-loop turn:
+//! Composes the three clients into a single voice-loop turn:
 //!
 //! ```text
 //! text (conversation history) → cognition (Ollama) → reply text
+//!                              → web search (Tavily/Brave, on demand)
 //!                              → TTS (Kokoro)      → WAV bytes
 //! ```
 //!
-//! The pipeline is **stateless** by design (Lark's decision, 2026-09-02):
-//! the caller owns the conversation history and passes the full message list
-//! on every turn. Conversation state is a later version — M0's goal is a fast
-//! baseline, and a stateless pipeline is the simplest thing that delivers it.
+//! ## Agent loop (2026-09-14)
+//!
+//! The pipeline is still **stateless** — the caller owns the conversation
+//! history and passes the full message list on every turn. What changed is
+//! that a single turn is now an *agent loop*: the model is offered a
+//! `web_search` tool, and if it requests a search, the pipeline executes the
+//! search, feeds the results back, and re-queries the model for a final
+//! answer. The loop is bounded (`MAX_TOOL_ROUNDS`) to prevent runaway
+//! tool-calling.
 
-use crate::cognition::{ChatMessage, CognitionClient, CognitionError};
+use crate::cognition::{ChatMessage, ChatReply, CognitionClient, CognitionError, Tool, ToolCall, ToolFunction};
 use crate::config::Config;
 use crate::tts::{TtsClient, TtsError};
+use crate::web_search::{SearchResult, WebSearchClient, WebSearchError};
+
+/// Maximum number of tool-calling rounds per turn before giving up.
+const MAX_TOOL_ROUNDS: usize = 3;
+
+/// The system prompt that frames Skye's persona and her tool use.
+const SYSTEM_PROMPT: &str = "\
+You are Skye, a warm, sharp voice assistant. You answer conversationally and \
+concisely, in a way that sounds natural when spoken aloud. You have a \
+`web_search` tool. Use it when the user asks about current events, recent \
+news, or facts you are not certain about. Otherwise answer directly from what \
+you know. Never mention the tool or the search itself — just answer the \
+question.";
 
 /// The result of one pipeline turn: the assistant's reply text and its
 /// synthesized WAV audio.
@@ -31,6 +50,9 @@ pub struct PipelineOutput {
 pub enum PipelineError {
     Cognition(CognitionError),
     Tts(TtsError),
+    WebSearch(WebSearchError),
+    /// The agent loop exhausted its tool rounds without a final answer.
+    NoReply,
 }
 
 impl std::fmt::Display for PipelineError {
@@ -38,6 +60,8 @@ impl std::fmt::Display for PipelineError {
         match self {
             PipelineError::Cognition(e) => write!(f, "cognition stage failed: {e}"),
             PipelineError::Tts(e) => write!(f, "tts stage failed: {e}"),
+            PipelineError::WebSearch(e) => write!(f, "web search stage failed: {e}"),
+            PipelineError::NoReply => write!(f, "agent loop produced no final reply"),
         }
     }
 }
@@ -56,10 +80,17 @@ impl From<TtsError> for PipelineError {
     }
 }
 
-/// The voice loop pipeline: cognition + TTS composed into one turn.
+impl From<WebSearchError> for PipelineError {
+    fn from(e: WebSearchError) -> Self {
+        PipelineError::WebSearch(e)
+    }
+}
+
+/// The voice loop pipeline: cognition + web search + TTS composed into one turn.
 pub struct Pipeline {
     cognition: CognitionClient,
     tts: TtsClient,
+    web_search: WebSearchClient,
 }
 
 impl Pipeline {
@@ -68,18 +99,102 @@ impl Pipeline {
         Self {
             cognition: CognitionClient::new(&config.cognition),
             tts: TtsClient::new(&config.tts),
+            web_search: WebSearchClient::new(&config.web_search),
         }
     }
 
-    /// Run one turn: reply to `messages`, then synthesize the reply to audio.
+    /// Run one turn: reply to `history`, then synthesize the reply to audio.
     ///
-    /// Stateless — `messages` is the full conversation history, supplied by
-    /// the caller. The pipeline stores nothing between turns.
-    pub async fn run(&self, messages: &[ChatMessage]) -> Result<PipelineOutput, PipelineError> {
-        let reply = self.cognition.chat(messages).await?;
+    /// Stateless — `history` is the full conversation (including the just-added
+    /// user message), supplied by the caller. The pipeline stores nothing
+    /// between turns. Within a turn it runs the agent loop: offer the model
+    /// the `web_search` tool, execute any requested search, and re-query until
+    /// the model produces a final answer (or the round cap is hit).
+    pub async fn run(&self, history: &[ChatMessage]) -> Result<PipelineOutput, PipelineError> {
+        // Working copy: system prompt + full history. The caller's history is
+        // untouched; tool-call scaffolding lives only in this local copy.
+        let mut working = Vec::with_capacity(history.len() + 1);
+        working.push(ChatMessage::system(SYSTEM_PROMPT));
+        working.extend_from_slice(history);
+
+        let tools = vec![self.web_search_tool()];
+        let mut reply = String::new();
+
+        for _ in 0..MAX_TOOL_ROUNDS {
+            let ChatReply { content, tool_calls } =
+                self.cognition.chat_with_tools(&working, &tools).await?;
+
+            if tool_calls.is_empty() {
+                reply = content;
+                break;
+            }
+
+            // Record the assistant's tool-call request, then execute each call.
+            working.push(ChatMessage::assistant_with_tool_calls(content, tool_calls.clone()));
+            for call in &tool_calls {
+                if call.function.name == "web_search" {
+                    let query = extract_query(&call);
+                    let results = self.web_search.search(&query).await?;
+                    working.push(ChatMessage::tool(format_search_results(&results)));
+                }
+            }
+        }
+
+        if reply.trim().is_empty() {
+            return Err(PipelineError::NoReply);
+        }
+
         let audio = self.tts.synthesize(&reply).await?;
         Ok(PipelineOutput { reply, audio })
     }
+
+    /// The `web_search` tool definition offered to the model.
+    fn web_search_tool(&self) -> Tool {
+        Tool {
+            kind: "function".into(),
+            function: ToolFunction {
+                name: "web_search".into(),
+                description: "Search the web for current or factual information.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The search query."
+                        }
+                    },
+                    "required": ["query"]
+                }),
+            },
+        }
+    }
+}
+
+/// Extract the search query from a tool call's arguments, tolerating both
+/// object (`{"query": "..."}`) and string (`"..."`) argument encodings.
+fn extract_query(call: &ToolCall) -> String {
+    match &call.function.arguments {
+        serde_json::Value::Object(map) => map
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        _ => String::new(),
+    }
+}
+
+/// Render search results as a compact text block for the model to read.
+fn format_search_results(results: &[SearchResult]) -> String {
+    if results.is_empty() {
+        return "No results found.".to_string();
+    }
+    results
+        .iter()
+        .enumerate()
+        .map(|(i, r)| format!("[{i}] {}\n{}\n{}", r.title, r.url, r.snippet))
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 #[cfg(test)]
@@ -91,5 +206,42 @@ mod tests {
     fn pipeline_builds_from_default_config() {
         let config = Config::default();
         let _pipeline = Pipeline::new(&config);
+    }
+
+    #[test]
+    fn extract_query_handles_object_and_string() {
+        let obj = ToolCall {
+            function: crate::cognition::ToolCallFunction {
+                name: "web_search".into(),
+                arguments: serde_json::json!({"query": "rust lang"}),
+            },
+        };
+        assert_eq!(extract_query(&obj), "rust lang");
+
+        let str_args = ToolCall {
+            function: crate::cognition::ToolCallFunction {
+                name: "web_search".into(),
+                arguments: serde_json::json!("rust lang"),
+            },
+        };
+        assert_eq!(extract_query(&str_args), "rust lang");
+    }
+
+    #[test]
+    fn format_search_results_renders_entries() {
+        let results = vec![SearchResult {
+            title: "T".into(),
+            url: "https://x".into(),
+            snippet: "body".into(),
+        }];
+        let text = format_search_results(&results);
+        assert!(text.contains("[0] T"));
+        assert!(text.contains("https://x"));
+        assert!(text.contains("body"));
+    }
+
+    #[test]
+    fn format_search_results_empty() {
+        assert_eq!(format_search_results(&[]), "No results found.");
     }
 }
