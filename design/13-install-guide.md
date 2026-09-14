@@ -124,6 +124,35 @@ cargo build --release
 ./target/release/prosopon-server
 ```
 
+**TLS cert permissions (production, 2026-09-14).** When `signaling.tls.cert`
+and `signaling.tls.key` point at a Let's Encrypt cert under
+`/etc/letsencrypt/live/<domain>/`, the server must be able to *read* those
+files. Let's Encrypt stores them as `root:ssl-cert` with mode `750`, so the
+`ubuntu` user needs to be in the `ssl-cert` group:
+
+```bash
+sudo usermod -aG ssl-cert ubuntu
+```
+
+Two gotchas that bite in practice:
+
+1. **Group membership is per-login-session.** Adding the group does not
+   retroactively grant it to an already-running shell. A shell started before
+   the `usermod` (or a non-interactive process like a scheduler/agent shell)
+   will *not* have `ssl-cert` in its effective group set, and the server will
+   die with `PermissionDenied` on `fullchain.pem`. Verify with `id` — if
+   `ssl-cert` is missing from the *current* shell's group list, re-login or
+   use `sg`:
+
+   ```bash
+   sg ssl-cert -c './target/release/prosopon-server config.yaml'
+   ```
+
+2. **Prefer a systemd unit.** A unit with `SupplementaryGroups=ssl-cert`
+   (or `Group=ssl-cert`) sidesteps the whole login-session problem and keeps
+   the server up across reboots. This is the durable fix; `sg` is the
+   one-off workaround.
+
 ---
 
 ## Part B — Client side (macOS, M1 Max)

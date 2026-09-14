@@ -100,7 +100,13 @@ round-trip. The WebRTC data channel then carries the actual traffic.
   side-channel) and runs *before* body parsing (an unauthenticated request
   gets an empty 401, leaking nothing about the endpoint's shape).
 - **TLS** — when `signaling.tls.cert` and `signaling.tls.key` are both set,
-  the server serves HTTPS; otherwise plain HTTP (localhost dev).
+  the server serves HTTPS; otherwise plain HTTP (localhost dev). **Cert
+  permissions (2026-09-14):** Let's Encrypt certs live at
+  `/etc/letsencrypt/live/<domain>/` as `root:ssl-cert` mode `750`, so the
+  server process must run with the `ssl-cert` group (e.g. `sg ssl-cert -c
+  '...'`, or a systemd unit with `SupplementaryGroups=ssl-cert`). A shell
+  whose effective group set lacks `ssl-cert` will fail with
+  `PermissionDenied` on `fullchain.pem` — see design/13 A4.
 - **Fresh peer connection per offer** — a WebRTC peer connection is bound to
   a single remote peer. Reusing one `pc` across offers leaves it stuck on the
   first client. So each offer builds a new `WebRtcServer`, and the answered
