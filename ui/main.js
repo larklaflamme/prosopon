@@ -1,4 +1,4 @@
-// Prosopon frontend — the orb, driven by the Rust state machine via Tauri events.
+// Prosopon frontend — the robot avatar, driven by the Rust state machine via Tauri events.
 // Uses the global `window.__TAURI__` (withGlobalTauri: true), so no build step.
 
 const { invoke } = window.__TAURI__.core;
@@ -20,6 +20,7 @@ const MAX_LOG_LINES = 500;
 const STATE_COLORS = {
   disconnected: "#4a4a55",
   idle: "#5b8def",
+  awaking: "#8ab4ff",
   listening: "#3b82f6",
   thinking: "#f59e0b",
   speaking: "#14b8a6",

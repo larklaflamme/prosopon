@@ -17,10 +17,34 @@
     </div>
   </header>
 
-  <!-- Orb -->
+  <!-- Robot avatar -->
   <main class="orb-stage">
     <div class="orb" id="orb" data-state="disconnected">
-      <div class="orb-glow"></div>
+      <svg class="robot" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <!-- antenna -->
+        <g class="antenna">
+          <line class="antenna-stem" x1="100" y1="36" x2="100" y2="56" />
+          <circle class="antenna-tip" cx="100" cy="28" r="7" />
+        </g>
+        <!-- head -->
+        <rect class="head" x="38" y="54" width="124" height="104" rx="26" />
+        <!-- face plate -->
+        <rect class="face" x="50" y="66" width="100" height="80" rx="18" />
+        <!-- eyes -->
+        <g class="eyes">
+          <circle class="eye eye-left" cx="78" cy="100" r="13" />
+          <circle class="eye eye-right" cx="122" cy="100" r="13" />
+          <circle class="pupil pupil-left" cx="78" cy="100" r="5" />
+          <circle class="pupil pupil-right" cx="122" cy="100" r="5" />
+        </g>
+        <!-- mouth / speaker grille -->
+        <g class="mouth">
+          <rect class="mouth-bar" x="82" y="126" width="36" height="8" rx="4" />
+        </g>
+        <!-- body + chest light -->
+        <rect class="body" x="70" y="158" width="60" height="34" rx="12" />
+        <circle class="chest" cx="100" cy="175" r="9" />
+      </svg>
     </div>
     <div class="state-label" id="state-label">disconnected</div>
   </main>

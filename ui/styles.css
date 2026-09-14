@@ -80,7 +80,7 @@ body {
   color: #fff;
 }
 
-/* ---- Orb stage ---- */
+/* ---- Robot stage ---- */
 .orb-stage {
   flex: 1;
   display: flex;
@@ -95,62 +95,194 @@ body {
   position: relative;
   width: var(--orb-size);
   height: var(--orb-size);
-  border-radius: 50%;
-  background: #4a4a55;
-  transition: background 0.3s ease;
+  /* Per-state accent color, consumed by the SVG parts below. */
+  --accent: #4a4a55;
+  --accent-soft: rgba(74, 74, 85, 0.35);
 }
 
-.orb-glow {
-  position: absolute;
-  inset: -20%;
-  border-radius: 50%;
-  background: radial-gradient(circle, rgba(91,141,239,0.25) 0%, transparent 70%);
-  opacity: 0;
-  transition: opacity 0.3s ease;
-  pointer-events: none;
+.robot {
+  width: 100%;
+  height: 100%;
+  display: block;
+  overflow: visible;
 }
 
-/* State colors */
-.orb[data-state="idle"]       { background: #5b8def; }
-.orb[data-state="listening"]   { background: #3b82f6; }
-.orb[data-state="thinking"]    { background: #f59e0b; }
-.orb[data-state="speaking"]    { background: #14b8a6; }
-.orb[data-state="disconnected"]{ background: #4a4a55; }
+/* ---- Robot parts (base) ---- */
+.antenna-stem {
+  stroke: #3a4150;
+  stroke-width: 4;
+  stroke-linecap: round;
+}
 
-/* State motions */
-.orb[data-state="idle"] {
+.antenna-tip {
+  fill: var(--accent);
+  transition: fill 0.3s ease;
+}
+
+.head {
+  fill: #2a2f3a;
+  stroke: #3a4150;
+  stroke-width: 3;
+  transition: stroke 0.3s ease;
+}
+
+.face {
+  fill: #1e232c;
+}
+
+.eye {
+  fill: var(--accent);
+  transition: fill 0.3s ease;
+}
+
+.pupil {
+  fill: #0f1115;
+}
+
+.mouth-bar {
+  fill: var(--accent);
+  transition: fill 0.3s ease;
+}
+
+.body {
+  fill: #2a2f3a;
+  stroke: #3a4150;
+  stroke-width: 3;
+}
+
+.chest {
+  fill: var(--accent);
+  transition: fill 0.3s ease;
+}
+
+/* ---- Per-state accent colors ---- */
+.orb[data-state="disconnected"] { --accent: #4a4a55; --accent-soft: rgba(74,74,85,0.35); }
+.orb[data-state="idle"]        { --accent: #5b8def; --accent-soft: rgba(91,141,239,0.35); }
+.orb[data-state="awaking"]     { --accent: #8ab4ff; --accent-soft: rgba(138,180,255,0.55); }
+.orb[data-state="listening"]   { --accent: #3b82f6; --accent-soft: rgba(59,130,246,0.45); }
+.orb[data-state="thinking"]    { --accent: #f59e0b; --accent-soft: rgba(245,158,11,0.45); }
+.orb[data-state="speaking"]    { --accent: #14b8a6; --accent-soft: rgba(20,184,166,0.45); }
+
+/* ---- State motions ---- */
+
+/* Disconnected: dim, static, eyes dark. */
+.orb[data-state="disconnected"] .robot {
+  opacity: 0.55;
+}
+
+/* Idle: gentle breathing + slow blink + chest pulse + antenna bob. */
+.orb[data-state="idle"] .robot {
   animation: breathe 4s ease-in-out infinite;
 }
-.orb[data-state="thinking"] {
+.orb[data-state="idle"] .eyes {
+  transform-origin: center;
+  animation: blink 4.5s infinite;
+}
+.orb[data-state="idle"] .chest {
+  animation: chest-pulse 3s ease-in-out infinite;
+}
+.orb[data-state="idle"] .antenna {
+  transform-origin: 100px 56px;
+  animation: antenna-bob 3.5s ease-in-out infinite;
+}
+
+/* Awaking: eyes snap wide + glow, antenna perks, quick startle squash. */
+.orb[data-state="awaking"] .robot {
+  animation: startle 0.4s ease-out;
+}
+.orb[data-state="awaking"] .eyes {
+  transform-origin: center;
+  animation: eyes-wide 0.4s ease-out;
+}
+.orb[data-state="awaking"] .antenna-tip {
+  filter: drop-shadow(0 0 6px var(--accent-soft));
+}
+
+/* Listening: eyes narrow to focus, chest steady, subtle lean. */
+.orb[data-state="listening"] .eyes {
+  transform: scaleY(0.45);
+}
+.orb[data-state="listening"] .chest {
+  animation: chest-pulse 1.2s ease-in-out infinite;
+}
+.orb[data-state="listening"] .robot {
+  animation: lean 1.6s ease-in-out infinite alternate;
+}
+
+/* Thinking: eyes look up, chest pulses fast. */
+.orb[data-state="thinking"] .pupil {
+  transform: translateY(-4px);
+}
+.orb[data-state="thinking"] .chest {
+  animation: chest-pulse 0.7s ease-in-out infinite;
+}
+.orb[data-state="thinking"] .robot {
   animation: pulse 1.5s ease-in-out infinite;
 }
-.orb[data-state="listening"],
-.orb[data-state="speaking"] {
-  animation: level 0.6s ease-in-out infinite alternate;
+
+/* Speaking: mouth animates, chest pulses in sync. */
+.orb[data-state="speaking"] .mouth-bar {
+  transform-origin: center;
+  animation: talk 0.28s ease-in-out infinite alternate;
 }
-.orb[data-state="disconnected"] {
-  animation: none;
-  opacity: 0.6;
+.orb[data-state="speaking"] .chest {
+  animation: chest-pulse 0.28s ease-in-out infinite alternate;
+}
+.orb[data-state="speaking"] .eyes {
+  transform: scaleY(0.8);
 }
 
-/* Muted — red ring, orthogonal to state */
-.orb.is-muted {
-  box-shadow: 0 0 0 3px #e74c3c;
+/* Muted — red ring, orthogonal to state. */
+.orb.is-muted .robot {
+  filter: drop-shadow(0 0 0 3px #e74c3c);
 }
 
+/* ---- Keyframes ---- */
 @keyframes breathe {
   0%, 100% { transform: scale(1.0); }
   50%      { transform: scale(1.04); }
 }
 
-@keyframes pulse {
-  0%, 100% { transform: scale(1.0); opacity: 1; }
-  50%      { transform: scale(1.08); opacity: 0.85; }
+@keyframes blink {
+  0%, 91%, 100% { transform: scaleY(1); }
+  94%           { transform: scaleY(0.08); }
 }
 
-@keyframes level {
-  from { transform: scale(1.0); }
-  to   { transform: scale(1.12); }
+@keyframes chest-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+
+@keyframes antenna-bob {
+  0%, 100% { transform: rotate(0deg); }
+  50%      { transform: rotate(4deg); }
+}
+
+@keyframes startle {
+  0%   { transform: scale(1.0); }
+  40%  { transform: scale(1.1, 0.92); }
+  100% { transform: scale(1.0); }
+}
+
+@keyframes eyes-wide {
+  0%   { transform: scale(1); }
+  50%  { transform: scale(1.35); }
+  100% { transform: scale(1); }
+}
+
+@keyframes lean {
+  from { transform: translateX(0); }
+  to   { transform: translateX(4px); }
+}
+
+@keyframes pulse {
+  0%, 100% { transform: scale(1.0); opacity: 1; }
+  50%      { transform: scale(1.06); opacity: 0.9; }
+}
+
+@keyframes talk {
+  from { transform: scaleY(0.4); }
+  to   { transform: scaleY(1.3); }
 }
 
 .state-label {
