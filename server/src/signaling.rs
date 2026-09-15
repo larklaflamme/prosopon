@@ -66,18 +66,35 @@ impl SignalingState {
     /// fixed `listen_port` bound — which blocks the next client from
     /// connecting. A brief network blip is handled by the client simply
     /// reconnecting with a fresh offer.
-    fn prune_dead_sessions(&self) {
-        self.sessions
-            .lock()
-            .unwrap()
-            .retain(|server| {
-                !matches!(
-                    server.connection_state(),
+    async fn prune_dead_sessions(&self) {
+        // Collect dead sessions first (without holding the lock across an
+        // await), then close each one. Closing is what actually releases the
+        // UDP socket: dropping the `Arc<WebRtcServer>` alone does not, because
+        // the pc holds the handler and the handler holds a clone of the pc (a
+        // reference cycle). Without the explicit close, the fixed `listen_port`
+        // stays bound and the next client's offer fails with 500.
+        let dead: Vec<Arc<WebRtcServer>> = {
+            let mut sessions = self.sessions.lock().unwrap();
+            let mut dead = Vec::new();
+            let mut i = 0;
+            while i < sessions.len() {
+                let state = sessions[i].connection_state();
+                if matches!(
+                    state,
                     RTCPeerConnectionState::Disconnected
                         | RTCPeerConnectionState::Closed
                         | RTCPeerConnectionState::Failed
-                )
-            });
+                ) {
+                    dead.push(sessions.remove(i));
+                } else {
+                    i += 1;
+                }
+            }
+            dead
+        };
+        for server in dead {
+            server.close().await;
+        }
     }
 }
 
@@ -150,7 +167,7 @@ async fn handle_offer(
     // session's UDP socket (still bound to the fixed `listen_port`) is freed
     // before we try to rebind it. Otherwise the bind fails with "address
     // already in use" and the client cannot reconnect.
-    state.prune_dead_sessions();
+    state.prune_dead_sessions().await;
 
     // A fresh peer connection per offer — a `pc` is single-peer.
     let server = Arc::new(

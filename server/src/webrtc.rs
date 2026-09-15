@@ -206,6 +206,16 @@ impl WebRtcServer {
         *self.connection_state.lock().unwrap()
     }
 
+    /// Close the peer connection, releasing its UDP socket. Dropping the
+    /// `WebRtcServer` alone does NOT free the socket: the pc holds the
+    /// handler, and the handler holds a clone of the pc (a reference cycle),
+    /// so the socket stays bound until `close()` is called explicitly. The
+    /// signaling layer calls this when pruning a dead session so the fixed
+    /// `listen_port` is freed for the next client.
+    pub async fn close(&self) {
+        let _ = self.pc.close().await;
+    }
+
     /// Answer an offer: set the remote description, add the client's ICE
     /// candidates, create the answer, set it as the local description, wait
     /// for gathering to complete, and return the answer plus the server's own
