@@ -1,5 +1,6 @@
-//! The presence state machine — the single source of truth that drives
-//! the orb's color + motion. This is the heart of the client.
+//! The presence state machine — the single source of truth for the client's
+//! presence state. The frontend (ui/) maps each state to the avatar's
+//! color + motion. This is the heart of the client.
 //!
 //! States are the *presence* of Skye; `muted` and `conversation_active` are
 //! orthogonal flags, not states, because you can be muted (or in a warm
@@ -16,31 +17,6 @@ pub enum State {
     Listening,
     Thinking,
     Speaking,
-}
-
-impl State {
-    /// Orb color for this state (CSS color). Motion first, color second,
-    /// label third — colorblind-safe.
-    pub fn color(&self) -> &'static str {
-        match self {
-            State::Disconnected => "#4a4a55", // grey, dim
-            State::Idle => "#5b8def",         // soft blue (Skye's identity)
-            State::Listening => "#3b82f6",    // bright blue
-            State::Thinking => "#f59e0b",     // amber
-            State::Speaking => "#14b8a6",     // teal
-        }
-    }
-
-    /// Orb motion for this state.
-    pub fn motion(&self) -> &'static str {
-        match self {
-            State::Disconnected => "static",
-            State::Idle => "breathing",
-            State::Listening => "level",
-            State::Thinking => "pulsing",
-            State::Speaking => "level",
-        }
-    }
 }
 
 /// The full client state: presence state + the orthogonal flags.
@@ -81,7 +57,6 @@ pub enum Transition {
     /// Abort an in-flight listen/think and return to idle (e.g. silence
     /// timeout, or a send/receive error). Legal from Listening or Thinking.
     Cancel,
-    ToggleMute,
     SetMute(bool),
 }
 
@@ -181,10 +156,6 @@ impl StateMachine {
                     }
                     _ => return None,
                 }
-            }
-            Transition::ToggleMute => {
-                self.current.muted = !self.current.muted;
-                return Some(self.current);
             }
             Transition::SetMute(m) => {
                 if self.current.muted != m {
