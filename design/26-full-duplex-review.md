@@ -54,9 +54,9 @@ Design §6 puts AEC at **step 2** (a prerequisite for correct barge-in). Plan §
 
 ---
 
-## 5. Open rulings needed from Lark
+## 5. Resolved rulings (2026-09-15)
 
-1. **Gap 1** — timer reconciliation: does the 5s warm-gap timer subsume the 15s utterance timeout, or do both remain meaningful?
-2. **Gap 2** — pre-roll→STT handoff mechanism (needs a concrete design before Phase 1).
-3. **Gap 3** — M0 barge-in mitigation: VAD gating/threshold vs. ducking.
-4. **§3** — "Hey Jarvis, stop" mid-conversation: accept the loss, or keep the wake-word sidecar warm?
+1. **Gap 1 — timer reconciliation** → `inactivity_timeout_secs = 5` is armed on `ResponseComplete`: 5 s of silence *after the agent's last response* cools to `Idle`. The 15 s `silence_timeout_secs` stays as the in-flight utterance endpoint timeout. Distinct arming points, distinct meanings — no subsumption.
+2. **Gap 2 — pre-roll→STT handoff** → properly design and review before Phase 1. See `27-pre-roll-stt-handoff.md`.
+3. **Gap 3 — M0 barge-in mitigation** → VAD gating/threshold (NOT ducking).
+4. **§3 — "Hey Jarvis, stop"** → keep the wake-word sidecar warm for the whole session.

@@ -87,6 +87,8 @@ while let Ok(chunk) = mic.next_chunk() {
 
 **Hook point:** `run_conversation_loop()` step 1→2 transition.
 
+**Gate:** the "drain buffer → switch to live" mechanism is underspecified here. See `27-pre-roll-stt-handoff.md` for the concrete design (single writer thread, snapshot-drain). Do not start Phase 1 until that design is reviewed.
+
 ---
 
 ## 4. Phase 2 — AEC (echo cancellation) — the hard part
@@ -95,7 +97,7 @@ while let Ok(chunk) = mic.next_chunk() {
 
 **Two-tier plan (be honest about risk):**
 
-**M0 — no AEC, ducking + VAD gating.** While speaking, run a simple energy VAD on the mic. To avoid self-trigger, either (a) duck playback volume, or (b) accept false-positives and rely on a "barge-in requires sustained speech > 300ms" heuristic. Cheap; gets multi-turn working; barge-in will be flaky.
+**M0 — no AEC, VAD gating/threshold.** While speaking, run a simple energy VAD on the mic. To avoid self-trigger on the agent's own TTS, gate the VAD during `Speaking` and/or raise the energy threshold — do NOT duck playback (ducking degrades the listening experience and treats the symptom). Cheap; gets multi-turn working; barge-in will be flaky.
 
 **M1 — real AEC.** Integrate `webrtc-audio-processing` (the `webrtc-audio-processing` crate). Feed it the reference signal (the TTS samples being played) + the mic signal; it outputs echo-cancelled mic audio. Run VAD on the cleaned signal. This is the Alexa iAEC approach from the research note.
 
@@ -170,12 +172,15 @@ Phases 0 and 3 are independent and can be done in parallel. Phase 4 depends on 0
 1. **AEC integration** (Phase 2-M1) — C++ build on arm64 macOS, rodio/cpal wiring. Highest risk. Verify crate builds before committing.
 2. **`cpal::Stream` `!Send`** — the bus must keep the `Mic` on one thread. Handled by the capture-thread design, but it's the constraint that shapes everything.
 3. **STT sidecar latency** — Moonshine streaming may add latency that makes barge-in feel sluggish. Measure before tuning.
-4. **Two sidecars alive simultaneously** — in the warm state, do we keep the wake-word sidecar running (to catch "Hey Jarvis, stop") or rely on VAD barge-in? The design says VAD barge-in (no wake word needed while warm), so the wake-word sidecar can be stopped while warm. Consequence: "Hey Jarvis" won't work mid-conversation — acceptable per the design.
+4. **Two sidecars alive simultaneously** — RESOLVED: keep the wake-word sidecar warm (running on a bus subscription) for the whole session, so "Hey Jarvis, stop" works mid-conversation. This is the Alexa "always-on wake word" behavior. Cost: the wake-word sidecar stays alive for the whole session; the bus fans to it continuously.
 
 ---
 
 ## 9. Resolved decisions (2026-09-15)
 
-1. **M0/M1 split** — M0 first (flaky-but-cheap barge-in: ducking + VAD gating). M1 (AEC) as a follow-up.
-2. **Inactivity timeout** — separate `inactivity_timeout_secs = 5`, distinct from `silence_timeout_secs = 15` (utterance timeout).
-3. **Mac tunnel** — up on port 2222; commits go to the prosopon repo.
+1. **M0/M1 split** — M0 first (flaky-but-cheap barge-in). M1 (AEC) as a follow-up.
+2. **M0 barge-in mitigation** — VAD gating/threshold (NOT ducking playback).
+3. **Inactivity timeout** — `inactivity_timeout_secs = 5`, armed on `ResponseComplete`: 5 s of silence *after the agent's last response* cools the session to `Idle`. Distinct from `silence_timeout_secs = 15`, which remains the in-flight utterance endpoint timeout (armed when the user starts speaking, not after the response).
+4. **Wake-word sidecar** — keep it warm for the whole session, so "Hey Jarvis, stop" works mid-conversation.
+5. **Pre-roll→STT handoff** — gate: must be properly designed and reviewed (see `27-pre-roll-stt-handoff.md`) before Phase 1 starts.
+6. **Mac tunnel** — up on port 2222; commits go to the prosopon repo.
