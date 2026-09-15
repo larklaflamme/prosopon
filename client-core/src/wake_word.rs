@@ -8,15 +8,15 @@
 //! the caller via the `on_log` callback, so it can be surfaced in the app's
 //! logs panel rather than lost to the terminal.
 //!
-//! The mic capture and the sidecar I/O are both blocking, so they run on
-//! dedicated threads. Dropping the detector (or calling [`WakeWordDetector::stop`])
-//! kills the sidecar, which closes the pipes and lets all threads exit.
-//!
-//! Note: `cpal::Stream` is `!Send` on CoreAudio (macOS), so the [`Mic`] is
-//! created *inside* the writer thread and never crosses a thread boundary.
+//! The detector consumes a [`MicSubscription`] from the shared [`MicBus`]
+//! rather than opening its own mic, so it can run simultaneously with the STT
+//! detector off the same audio. The sidecar I/O is blocking, so it runs on a
+//! dedicated writer thread. Dropping the detector (or calling
+//! [`WakeWordDetector::stop`]) kills the sidecar, which closes the pipes and
+//! lets all threads exit.
 
 use crate::config::WakeWordConfig;
-use crate::mic::Mic;
+use crate::mic_bus::MicSubscription;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -27,8 +27,6 @@ use thiserror::Error;
 pub enum WakeWordError {
     #[error("failed to spawn wake-word sidecar: {0}")]
     Spawn(#[from] std::io::Error),
-    #[error("mic error: {0}")]
-    Mic(#[from] crate::mic::MicError),
 }
 
 /// A running wake-word detector.
@@ -43,18 +41,18 @@ pub struct WakeWordDetector {
 }
 
 impl WakeWordDetector {
-    /// Spawn the sidecar, start the mic, and begin streaming audio to it.
+    /// Spawn the sidecar and begin streaming audio to it from `sub`.
     ///
     /// Returns the detector (for lifecycle) and a receiver that yields one
-    /// `()` per wake-word detection. Blocks until the mic is confirmed open
-    /// (or fails), so a missing device / denied permission surfaces as an
-    /// error here rather than silently.
+    /// `()` per wake-word detection. The mic itself is owned by the shared
+    /// [`MicBus`], which is already confirmed open before this is called.
     ///
     /// `on_log` is invoked (from the sidecar's stderr reader thread and the
-    /// mic writer thread) with each log line, so the caller can surface
-    /// sidecar diagnostics in the UI.
+    /// writer thread) with each log line, so the caller can surface sidecar
+    /// diagnostics in the UI.
     pub fn start(
         cfg: &WakeWordConfig,
+        sub: MicSubscription,
         on_log: impl Fn(String) + Send + Clone + 'static,
     ) -> Result<(Self, mpsc::Receiver<()>), WakeWordError> {
         let mut child = Command::new(&cfg.python)
@@ -90,25 +88,15 @@ impl WakeWordDetector {
 
         let (wake_tx, wake_rx) = mpsc::channel::<()>();
 
-        // Writer thread: creates the Mic *here* (so it stays on this thread),
-        // then streams f32 chunks -> int16 PCM bytes -> sidecar stdin.
+        // Writer thread: streams f32 chunks -> int16 PCM bytes -> sidecar
+        // stdin. The subscription is `Send`, so it can move onto this thread.
         let on_log_writer = on_log.clone();
-        let (ready_tx, ready_rx) = mpsc::channel::<Result<(), crate::mic::MicError>>();
         let writer = thread::spawn(move || {
-            let mic = match Mic::start() {
-                Ok(m) => m,
-                Err(e) => {
-                    let _ = ready_tx.send(Err(e));
-                    return;
-                }
-            };
-            let _ = ready_tx.send(Ok(()));
-
             let mut stdin = stdin;
             let mut level_samples: u64 = 0;
             let mut level_sum_sq: f64 = 0.0;
             let mut level_peak: f32 = 0.0;
-            while let Ok(chunk) = mic.next_chunk() {
+            while let Ok(chunk) = sub.next_chunk() {
                 // Level meter: accumulate RMS/peak, log once per second.
                 for &s in &chunk {
                     level_sum_sq += (s as f64) * (s as f64);
@@ -135,24 +123,6 @@ impl WakeWordDetector {
                 }
             }
         });
-
-        // Wait for the mic to open (or fail) before returning.
-        match ready_rx.recv() {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(WakeWordError::Mic(e));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(WakeWordError::Spawn(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "mic thread exited before reporting readiness",
-                )));
-            }
-        }
 
         // Reader thread: sidecar stdout lines -> wake events.
         let reader = thread::spawn(move || {

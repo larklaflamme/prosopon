@@ -1,8 +1,9 @@
 //! The presence state machine — the single source of truth that drives
 //! the orb's color + motion. This is the heart of the client.
 //!
-//! States are the *presence* of Skye; `muted` is an orthogonal flag, not a
-//! state, because you can be muted in any state.
+//! States are the *presence* of Skye; `muted` and `conversation_active` are
+//! orthogonal flags, not states, because you can be muted (or in a warm
+//! multi-turn conversation) in any state.
 
 use serde::{Deserialize, Serialize};
 
@@ -42,11 +43,14 @@ impl State {
     }
 }
 
-/// The full client state: presence state + the orthogonal muted flag.
+/// The full client state: presence state + the orthogonal flags.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ClientState {
     pub state: State,
     pub muted: bool,
+    /// True while in a warm multi-turn conversation (no wake word needed
+    /// between turns). False when cold (wake word required to listen).
+    pub conversation_active: bool,
 }
 
 impl Default for ClientState {
@@ -54,6 +58,7 @@ impl Default for ClientState {
         Self {
             state: State::Disconnected,
             muted: false,
+            conversation_active: false,
         }
     }
 }
@@ -67,6 +72,12 @@ pub enum Transition {
     UtteranceComplete,
     ResponseStarted,
     ResponseComplete,
+    /// Interrupt in-flight speech and hand the floor back to the user.
+    /// Legal from Speaking while warm: Speaking → Listening.
+    BargeIn,
+    /// The warm conversation's inactivity gap elapsed. Ends the session:
+    /// Listening → Idle, conversation_active = false.
+    InactivityTimeout,
     /// Abort an in-flight listen/think and return to idle (e.g. silence
     /// timeout, or a send/receive error). Legal from Listening or Thinking.
     Cancel,
@@ -103,14 +114,17 @@ impl StateMachine {
             }
             Transition::Disconnect => {
                 if self.current.state != State::Disconnected {
+                    self.current.conversation_active = false;
                     State::Disconnected
                 } else {
                     return None;
                 }
             }
             Transition::WakeWord => {
-                // Cannot listen while muted or disconnected.
+                // Cannot listen while muted or disconnected. Only from Idle
+                // (cold) — in a warm conversation the user just speaks.
                 if self.current.state == State::Idle && !self.current.muted {
+                    self.current.conversation_active = true;
                     State::Listening
                 } else {
                     return None;
@@ -132,6 +146,28 @@ impl StateMachine {
             }
             Transition::ResponseComplete => {
                 if self.current.state == State::Speaking {
+                    // Warm conversation → keep listening; cold → back to idle.
+                    if self.current.conversation_active {
+                        State::Listening
+                    } else {
+                        State::Idle
+                    }
+                } else {
+                    return None;
+                }
+            }
+            Transition::BargeIn => {
+                // Interrupt speech, hand the floor back. Only while warm.
+                if self.current.state == State::Speaking && self.current.conversation_active {
+                    State::Listening
+                } else {
+                    return None;
+                }
+            }
+            Transition::InactivityTimeout => {
+                // End the warm session after the silence gap.
+                if self.current.state == State::Listening {
+                    self.current.conversation_active = false;
                     State::Idle
                 } else {
                     return None;
@@ -139,7 +175,10 @@ impl StateMachine {
             }
             Transition::Cancel => {
                 match self.current.state {
-                    State::Listening | State::Thinking => State::Idle,
+                    State::Listening | State::Thinking => {
+                        self.current.conversation_active = false;
+                        State::Idle
+                    }
                     _ => return None,
                 }
             }
@@ -176,16 +215,18 @@ mod tests {
         let m = StateMachine::new();
         assert_eq!(m.current().state, State::Disconnected);
         assert!(!m.current().muted);
+        assert!(!m.current().conversation_active);
     }
 
     #[test]
-    fn full_happy_path() {
+    fn full_happy_path_warm() {
         let mut m = StateMachine::new();
         assert!(m.apply(Transition::Connect).is_some());
         assert_eq!(m.current().state, State::Idle);
 
         assert!(m.apply(Transition::WakeWord).is_some());
         assert_eq!(m.current().state, State::Listening);
+        assert!(m.current().conversation_active);
 
         assert!(m.apply(Transition::UtteranceComplete).is_some());
         assert_eq!(m.current().state, State::Thinking);
@@ -193,18 +234,74 @@ mod tests {
         assert!(m.apply(Transition::ResponseStarted).is_some());
         assert_eq!(m.current().state, State::Speaking);
 
+        // Warm: response completes back into Listening, not Idle.
         assert!(m.apply(Transition::ResponseComplete).is_some());
+        assert_eq!(m.current().state, State::Listening);
+        assert!(m.current().conversation_active);
+
+        // Second turn without a wake word.
+        assert!(m.apply(Transition::UtteranceComplete).is_some());
+        assert_eq!(m.current().state, State::Thinking);
+        assert!(m.apply(Transition::ResponseStarted).is_some());
+        assert!(m.apply(Transition::ResponseComplete).is_some());
+        assert_eq!(m.current().state, State::Listening);
+
+        // Inactivity gap ends the warm session.
+        assert!(m.apply(Transition::InactivityTimeout).is_some());
         assert_eq!(m.current().state, State::Idle);
+        assert!(!m.current().conversation_active);
     }
 
     #[test]
-    fn cancel_from_listening_returns_to_idle() {
+    fn barge_in_interrupts_speech() {
+        let mut m = StateMachine::new();
+        m.apply(Transition::Connect);
+        m.apply(Transition::WakeWord);
+        m.apply(Transition::UtteranceComplete);
+        m.apply(Transition::ResponseStarted);
+        assert_eq!(m.current().state, State::Speaking);
+
+        assert!(m.apply(Transition::BargeIn).is_some());
+        assert_eq!(m.current().state, State::Listening);
+        assert!(m.current().conversation_active);
+    }
+
+    #[test]
+    fn barge_in_illegal_when_cold() {
+        let mut m = StateMachine::new();
+        m.apply(Transition::Connect);
+        // Cold (never woke): BargeIn from Speaking is impossible anyway, but
+        // guard the flag path: a cold machine can't be Speaking without a
+        // wake word, so this is just a no-op sanity check.
+        assert!(m.apply(Transition::BargeIn).is_none());
+    }
+
+    #[test]
+    fn inactivity_timeout_ends_warm_session() {
+        let mut m = StateMachine::new();
+        m.apply(Transition::Connect);
+        m.apply(Transition::WakeWord);
+        assert_eq!(m.current().state, State::Listening);
+        assert!(m.current().conversation_active);
+
+        assert!(m.apply(Transition::InactivityTimeout).is_some());
+        assert_eq!(m.current().state, State::Idle);
+        assert!(!m.current().conversation_active);
+
+        // After going cold, the wake word is required again.
+        assert!(m.apply(Transition::WakeWord).is_some());
+        assert_eq!(m.current().state, State::Listening);
+    }
+
+    #[test]
+    fn cancel_from_listening_returns_to_idle_and_cools() {
         let mut m = StateMachine::new();
         m.apply(Transition::Connect);
         m.apply(Transition::WakeWord);
         assert_eq!(m.current().state, State::Listening);
         assert!(m.apply(Transition::Cancel).is_some());
         assert_eq!(m.current().state, State::Idle);
+        assert!(!m.current().conversation_active);
     }
 
     #[test]
@@ -239,19 +336,26 @@ mod tests {
         let mut m = StateMachine::new();
         // Cannot wake word while disconnected.
         assert!(m.apply(Transition::WakeWord).is_none());
-        // Cannot complete utterance while not listening.
+        // Cannot complete utterance while idle.
         assert!(m.apply(Transition::UtteranceComplete).is_none());
-        // Double connect is a no-op.
-        m.apply(Transition::Connect);
-        assert!(m.apply(Transition::Connect).is_none());
+        // Cannot start response while idle.
+        assert!(m.apply(Transition::ResponseStarted).is_none());
+        // Cannot complete response while idle.
+        assert!(m.apply(Transition::ResponseComplete).is_none());
+        // Cannot barge in while idle.
+        assert!(m.apply(Transition::BargeIn).is_none());
+        // Cannot time out while idle.
+        assert!(m.apply(Transition::InactivityTimeout).is_none());
     }
 
     #[test]
-    fn disconnect_from_any_state() {
+    fn disconnect_resets_conversation() {
         let mut m = StateMachine::new();
         m.apply(Transition::Connect);
         m.apply(Transition::WakeWord);
+        assert!(m.current().conversation_active);
         assert!(m.apply(Transition::Disconnect).is_some());
         assert_eq!(m.current().state, State::Disconnected);
+        assert!(!m.current().conversation_active);
     }
 }

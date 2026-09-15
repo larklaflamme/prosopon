@@ -18,6 +18,7 @@
 pub mod config;
 pub mod signaling;
 pub mod mic;
+pub mod mic_bus;
 pub mod wake_word;
 pub mod stt;
 pub mod webrtc_client;

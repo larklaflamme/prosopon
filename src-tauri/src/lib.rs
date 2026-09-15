@@ -6,7 +6,8 @@
 
 mod state_machine;
 
-use prosopon_client_core::stt::SttDetector;
+use prosopon_client_core::mic_bus::MicBus;
+use prosopon_client_core::stt::{SttDetector, SttEvent};
 use prosopon_client_core::wake_word::WakeWordDetector;
 use prosopon_client_core::webrtc_client::WebRtcClient;
 use state_machine::{ClientState, StateMachine, Transition};
@@ -37,6 +38,10 @@ pub struct AppState {
     /// The running wake-word detector, if any. Held so it stays alive (and
     /// so it can be stopped on disconnect).
     wake_word: Mutex<Option<WakeWordDetector>>,
+    /// The shared mic bus, if any. Held so it stays alive (and so it can be
+    /// stopped on disconnect). The standalone wake-word path owns one; the
+    /// conversation loop owns its own local bus.
+    mic_bus: Mutex<Option<MicBus>>,
     /// Ring buffer of recent log lines, so the webview can backfill on load.
     logs: Mutex<VecDeque<LogEvent>>,
 }
@@ -192,6 +197,16 @@ async fn graceful_shutdown(app: &AppHandle) {
         detector.stop();
     }
 
+    // Stop the shared mic bus (stops capture + disconnects subscribers).
+    let bus = {
+        let state = app.state::<AppState>();
+        let b = state.mic_bus.lock().unwrap().take();
+        b
+    };
+    if let Some(mut bus) = bus {
+        bus.stop();
+    }
+
     // Flip the state machine to Disconnected.
     let state = app.state::<AppState>();
     let mut machine = state.machine.lock().unwrap();
@@ -261,8 +276,15 @@ fn start_wake_word_inner(app: &AppHandle) -> Result<(), String> {
         ),
     );
 
+    // Open the shared mic bus and subscribe the wake-word sidecar to it.
+    let bus = MicBus::start().map_err(|e| {
+        emit_log(app, "error", "wake_word", format!("mic bus failed: {e}"));
+        e.to_string()
+    })?;
+    let sub = bus.subscribe();
+
     let app_for_log = (*app).clone();
-    let (detector, wake_rx) = WakeWordDetector::start(&config.wake_word, move |line| {
+    let (detector, wake_rx) = WakeWordDetector::start(&config.wake_word, sub, move |line| {
         emit_log(&app_for_log, "info", "sidecar", line);
     })
     .map_err(|e| {
@@ -273,6 +295,7 @@ fn start_wake_word_inner(app: &AppHandle) -> Result<(), String> {
     {
         let state = app.state::<AppState>();
         *state.wake_word.lock().unwrap() = Some(detector);
+        *state.mic_bus.lock().unwrap() = Some(bus);
     }
 
     // Background thread: on each wake event, flip Idle -> Listening.
@@ -294,9 +317,10 @@ fn start_wake_word_inner(app: &AppHandle) -> Result<(), String> {
 /// Start the full voice loop: wake word → STT → send → receive → play →
 /// repeat. This is the bridge that ties the two sides together.
 ///
-/// The loop owns the wake-word and STT detector lifecycles so the mic is
-/// handed off cleanly between them (only one detector can own the mic at a
-/// time). It runs on a background thread and loops until the process exits.
+/// The loop owns the wake-word detector lifecycle (started fresh each turn)
+/// and keeps the STT detector warm for the whole session (gated, so it only
+/// hears real audio while the machine is in `Listening`). It runs on a
+/// background thread and loops until the process exits.
 #[tauri::command]
 fn start_conversation(app: AppHandle) -> Result<(), String> {
     // Stop any standalone wake-word detector first — the loop owns it now.
@@ -308,6 +332,15 @@ fn start_conversation(app: AppHandle) -> Result<(), String> {
     if let Some(mut d) = detector {
         d.stop();
     }
+    // Also stop the standalone mic bus (the loop owns its own bus now).
+    let bus = {
+        let state = app.state::<AppState>();
+        let b = state.mic_bus.lock().unwrap().take();
+        b
+    };
+    if let Some(mut b) = bus {
+        b.stop();
+    }
     run_conversation_loop(app);
     Ok(())
 }
@@ -318,11 +351,42 @@ fn run_conversation_loop(app: AppHandle) {
     std::thread::spawn(move || {
         let config = load_client_config();
         let silence_timeout = std::time::Duration::from_secs(config.conversation.silence_timeout_secs);
+        let inactivity_timeout = std::time::Duration::from_secs(config.conversation.inactivity_timeout_secs);
+
+        // Phase 0: one shared mic bus for the whole session. The wake-word
+        // and STT sidecars subscribe to it instead of opening their own mic.
+        let bus = match MicBus::start() {
+            Ok(b) => b,
+            Err(e) => {
+                emit_log(&app, "error", "conversation", format!("mic bus failed: {e}"));
+                return;
+            }
+        };
+        emit_log(&app, "info", "conversation", "mic bus open");
+
+        // Start the STT detector ONCE, warm, with the feed gate closed. It
+        // stays alive for the whole session; the gate controls whether it
+        // hears real audio (open while Listening) or silence (otherwise).
+        // This eliminates the cold-start race where the model-load delay ate
+        // the user's first utterance.
+        let stt_sub = bus.subscribe();
+        let app_for_log = app.clone();
+        let (stt, stt_rx) = match SttDetector::start(&config.stt, stt_sub, move |line| {
+            emit_log(&app_for_log, "info", "stt", line);
+        }) {
+            Ok(x) => x,
+            Err(e) => {
+                emit_log(&app, "error", "conversation", format!("STT failed: {e}"));
+                return;
+            }
+        };
+        emit_log(&app, "info", "conversation", "STT warm (gated)");
 
         loop {
-            // --- 1. Wake word ---
+            // --- COLD: wake word ---
+            let sub = bus.subscribe();
             let app_for_log = app.clone();
-            let (detector, wake_rx) = match WakeWordDetector::start(&config.wake_word, move |line| {
+            let (detector, wake_rx) = match WakeWordDetector::start(&config.wake_word, sub, move |line| {
                 emit_log(&app_for_log, "info", "wake_word", line);
             }) {
                 Ok(x) => x,
@@ -346,113 +410,208 @@ fn run_conversation_loop(app: AppHandle) {
                 }
             }
 
-            // Stop the wake word to free the mic for STT.
+            // Stop the wake word (drops its bus subscription). The bus keeps
+            // capturing; STT is already subscribed and stays warm.
             let mut detector = detector;
             detector.stop();
 
-            // --- 2. STT ---
-            let app_for_log = app.clone();
-            let (stt, stt_rx) = match SttDetector::start(&config.stt, move |line| {
-                emit_log(&app_for_log, "info", "stt", line);
-            }) {
-                Ok(x) => x,
-                Err(e) => {
-                    emit_log(&app, "error", "conversation", format!("STT failed: {e}"));
-                    cancel_to_idle(&app);
-                    continue;
-                }
-            };
-            emit_log(&app, "info", "conversation", "listening for utterance");
+            // --- WARM: multi-turn conversation ---
+            // After the wake word, stay warm: listen for utterances without
+            // requiring the wake word again, until the inactivity timeout
+            // elapses. The first turn uses the longer silence timeout (grace
+            // after the wake word); subsequent turns use the inactivity
+            // timeout.
+            let mut first_turn = true;
+            loop {
+                let timeout = if first_turn { silence_timeout } else { inactivity_timeout };
+                first_turn = false;
 
-            // Wait for a completed utterance (with a silence timeout).
-            let text = match stt_rx.recv_timeout(silence_timeout) {
-                Ok(t) => t,
-                Err(_) => {
-                    emit_log(&app, "info", "conversation", "utterance timeout (silence)");
-                    let mut stt = stt;
-                    stt.stop();
-                    cancel_to_idle(&app);
-                    continue;
-                }
-            };
-            let mut stt = stt;
-            stt.stop();
-            emit_log(&app, "info", "conversation", format!("utterance: {text}"));
+                // Open the STT feed gate. STT is already warm; opening the
+                // gate lets real audio flow immediately.
+                stt.set_listening(true);
+                emit_log(&app, "info", "conversation", "listening for utterance");
 
-            // --- 3. Send + receive ---
-            {
-                let state = app.state::<AppState>();
-                let mut machine = state.machine.lock().unwrap();
-                if let Some(s) = machine.apply(Transition::UtteranceComplete) {
-                    emit_state(&app, s);
-                }
-            }
-
-            let client = {
-                let state = app.state::<AppState>();
-                let c = state.webrtc.lock().unwrap().as_ref().cloned();
-                c
-            };
-            let Some(client) = client else {
-                emit_log(&app, "error", "conversation", "not connected");
-                cancel_to_idle(&app);
-                continue;
-            };
-
-            // send_text + recv_audio are async; run them on the Tauri runtime
-            // and hand the result back over a channel.
-            let (tx, rx) = std::sync::mpsc::channel();
-            let client_for_task = client.clone();
-            let text_for_task = text.clone();
-            tauri::async_runtime::spawn(async move {
-                let result = async {
-                    client_for_task.send_text(&text_for_task).await?;
-                    client_for_task.recv_audio().await
-                }
-                .await;
-                let _ = tx.send(result);
-            });
-
-            let audio = match rx.recv() {
-                Ok(r) => r,
-                Err(_) => {
-                    emit_log(&app, "error", "conversation", "async task dropped");
-                    cancel_to_idle(&app);
-                    continue;
-                }
-            };
-
-            match audio {
-                Ok(bytes) => {
-                    emit_log(
-                        &app,
-                        "info",
-                        "conversation",
-                        format!("received {} bytes of audio", bytes.len()),
-                    );
-                    {
-                        let state = app.state::<AppState>();
-                        let mut machine = state.machine.lock().unwrap();
-                        if let Some(s) = machine.apply(Transition::ResponseStarted) {
-                            emit_state(&app, s);
+                // Wait for a completed utterance, resetting the inactivity
+                // deadline whenever speech is in progress (a PARTIAL line).
+                // This keeps the warm session alive while the user is still
+                // speaking, instead of timing out mid-utterance.
+                let mut deadline = std::time::Instant::now() + timeout;
+                let text = loop {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    match stt_rx.recv_timeout(remaining) {
+                        Ok(SttEvent::Final(t)) => break Ok(t),
+                        Ok(SttEvent::Partial) => {
+                            // Speech in progress — reset the deadline.
+                            deadline = std::time::Instant::now() + timeout;
+                        }
+                        Err(_) => {
+                            // Deadline reached (or sidecar died) — end the warm
+                            // session.
+                            emit_log(&app, "info", "conversation", "utterance timeout (silence)");
+                            stt.set_listening(false);
+                            // Drain any stale events from the aborted utterance
+                            // so they don't leak into the next turn.
+                            while stt_rx.try_recv().is_ok() {}
+                            // End the warm session: Listening -> Idle, cold again.
+                            {
+                                let state = app.state::<AppState>();
+                                let mut machine = state.machine.lock().unwrap();
+                                if let Some(s) = machine.apply(Transition::InactivityTimeout) {
+                                    emit_state(&app, s);
+                                }
+                            }
+                            break Err(());
                         }
                     }
-                    // --- 4. Play ---
-                    play_audio(&app, &bytes);
-                    {
-                        let state = app.state::<AppState>();
-                        let mut machine = state.machine.lock().unwrap();
-                        if let Some(s) = machine.apply(Transition::ResponseComplete) {
-                            emit_state(&app, s);
-                        }
+                };
+                let text = match text {
+                    Ok(t) => t,
+                    Err(()) => break,
+                };
+                stt.set_listening(false);
+                emit_log(&app, "info", "conversation", format!("utterance: {text}"));
+
+                // --- Send + receive ---
+                {
+                    let state = app.state::<AppState>();
+                    let mut machine = state.machine.lock().unwrap();
+                    if let Some(s) = machine.apply(Transition::UtteranceComplete) {
+                        emit_state(&app, s);
                     }
                 }
-                Err(e) => {
-                    emit_log(&app, "error", "conversation", format!("receive failed: {e}"));
+
+                let client = {
+                    let state = app.state::<AppState>();
+                    let c = state.webrtc.lock().unwrap().as_ref().cloned();
+                    c
+                };
+                let Some(client) = client else {
+                    emit_log(&app, "error", "conversation", "not connected");
                     cancel_to_idle(&app);
+                    break;
+                };
+
+                // send_text + recv_audio are async; run them on the Tauri
+                // runtime and hand the result back over a channel.
+                let (tx, rx) = std::sync::mpsc::channel();
+                let client_for_task = client.clone();
+                let text_for_task = text.clone();
+                tauri::async_runtime::spawn(async move {
+                    let result = async {
+                        client_for_task.send_text(&text_for_task).await?;
+                        client_for_task.recv_audio().await
+                    }
+                    .await;
+                    let _ = tx.send(result);
+                });
+
+                let audio = match rx.recv() {
+                    Ok(r) => r,
+                    Err(_) => {
+                        emit_log(&app, "error", "conversation", "async task dropped");
+                        cancel_to_idle(&app);
+                        break;
+                    }
+                };
+
+                match audio {
+                    Ok(bytes) => {
+                        emit_log(
+                            &app,
+                            "info",
+                            "conversation",
+                            format!("received {} bytes of audio", bytes.len()),
+                        );
+                        {
+                            let state = app.state::<AppState>();
+                            let mut machine = state.machine.lock().unwrap();
+                            if let Some(s) = machine.apply(Transition::ResponseStarted) {
+                                emit_state(&app, s);
+                            }
+                        }
+                        // --- Play (interruptible for barge-in) ---
+                        let playback = match prosopon_client_core::playback::Playback::start(&bytes) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                emit_log(&app, "error", "playback", format!("playback failed: {e}"));
+                                {
+                                    let state = app.state::<AppState>();
+                                    let mut machine = state.machine.lock().unwrap();
+                                    if let Some(s) = machine.apply(Transition::ResponseComplete) {
+                                        emit_state(&app, s);
+                                    }
+                                }
+                                continue;
+                            }
+                        };
+
+                        // Listen for a barge-in wake word during playback.
+                        let barge_sub = bus.subscribe();
+                        let app_for_log = app.clone();
+                        let (mut ww, ww_rx) = match WakeWordDetector::start(&config.wake_word, barge_sub, move |line| {
+                            emit_log(&app_for_log, "info", "wake_word", line);
+                        }) {
+                            Ok(x) => x,
+                            Err(e) => {
+                                emit_log(&app, "error", "wake_word", format!("barge-in wake word failed: {e}"));
+                                playback.wait();
+                                {
+                                    let state = app.state::<AppState>();
+                                    let mut machine = state.machine.lock().unwrap();
+                                    if let Some(s) = machine.apply(Transition::ResponseComplete) {
+                                        emit_state(&app, s);
+                                    }
+                                }
+                                continue;
+                            }
+                        };
+
+                        // Poll: wake word (barge-in) vs playback completion.
+                        let mut barged = false;
+                        loop {
+                            if playback.is_finished() {
+                                break;
+                            }
+                            match ww_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                                Ok(()) => {
+                                    emit_log(&app, "info", "conversation", "barge-in detected");
+                                    playback.stop();
+                                    barged = true;
+                                    break;
+                                }
+                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                            }
+                        }
+                        ww.stop();
+
+                        if barged {
+                            {
+                                let state = app.state::<AppState>();
+                                let mut machine = state.machine.lock().unwrap();
+                                if let Some(s) = machine.apply(Transition::BargeIn) {
+                                    emit_state(&app, s);
+                                }
+                            }
+                            // BargeIn -> Listening (warm). Loop back to listen.
+                        } else {
+                            {
+                                let state = app.state::<AppState>();
+                                let mut machine = state.machine.lock().unwrap();
+                                if let Some(s) = machine.apply(Transition::ResponseComplete) {
+                                    emit_state(&app, s);
+                                }
+                            }
+                            // ResponseComplete -> Listening (warm). Loop back.
+                        }
+                    }
+                    Err(e) => {
+                        emit_log(&app, "error", "conversation", format!("receive failed: {e}"));
+                        cancel_to_idle(&app);
+                        break;
+                    }
                 }
             }
-            // loop back to the wake word
         }
     });
 }
@@ -463,22 +622,6 @@ fn cancel_to_idle(app: &AppHandle) {
     let mut machine = state.machine.lock().unwrap();
     if let Some(s) = machine.apply(Transition::Cancel) {
         emit_state(app, s);
-    }
-}
-
-/// Play the WAV response audio.
-///
-/// Decodes the WAV bytes from the server and plays them on the default
-/// output device via rodio (hound). Blocks until playback completes.
-fn play_audio(app: &AppHandle, bytes: &[u8]) {
-    match prosopon_client_core::playback::play_wav(bytes) {
-        Ok(()) => emit_log(
-            app,
-            "info",
-            "playback",
-            format!("played {} bytes of audio", bytes.len()),
-        ),
-        Err(e) => emit_log(app, "error", "playback", format!("playback failed: {e}")),
     }
 }
 
@@ -495,6 +638,7 @@ pub fn run() {
             machine: Mutex::new(StateMachine::new()),
             webrtc: Mutex::new(None),
             wake_word: Mutex::new(None),
+            mic_bus: Mutex::new(None),
             logs: Mutex::new(VecDeque::new()),
         })
         .setup(|app| {

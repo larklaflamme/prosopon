@@ -142,6 +142,11 @@ pub struct ConversationConfig {
     /// Silence timeout (seconds): if no utterance completes within this
     /// window after the wake word, return to idle.
     pub silence_timeout_secs: u64,
+    /// Inactivity timeout (seconds): how long of silence after the agent
+    /// finishes speaking before the warm multi-turn session ends and the
+    /// client returns to cold (wake word required again). Distinct from
+    /// `silence_timeout_secs`, which bounds a single in-flight utterance.
+    pub inactivity_timeout_secs: u64,
 }
 
 impl Default for ConversationConfig {
@@ -149,6 +154,7 @@ impl Default for ConversationConfig {
         Self {
             auto_start: false,
             silence_timeout_secs: 15,
+            inactivity_timeout_secs: 5,
         }
     }
 }
@@ -208,5 +214,7 @@ mod tests {
         assert_eq!(cfg.wake_word.model, "hey_jarvis");
         assert_eq!(cfg.stt.model_arch, "small-streaming");
         assert!(!cfg.conversation.auto_start);
+        assert_eq!(cfg.conversation.silence_timeout_secs, 15);
+        assert_eq!(cfg.conversation.inactivity_timeout_secs, 5);
     }
 }

@@ -3,19 +3,31 @@
 //! The detector spawns the Python sidecar (`sidecar/stt.py`), streams the
 //! mic's 16 kHz mono f32 PCM to its stdin (converted to int16), and reads
 //! its stdout. Each `FINAL <text>` line becomes a completed utterance on the
-//! returned channel; `PARTIAL <text>` lines are forwarded to `on_log` for
-//! live display.
+//! returned channel; `PARTIAL <text>` lines become an activity signal (see
+//! [`SttEvent::Partial`]) so the caller can keep a warm session alive while
+//! the user is still speaking.
 //!
-//! This mirrors `wake_word.rs` exactly: the mic capture and the sidecar I/O
-//! are both blocking, so they run on dedicated threads. `cpal::Stream` is
-//! `!Send` on CoreAudio (macOS), so the [`Mic`] is created *inside* the
-//! writer thread and never crosses a thread boundary.
+//! The detector consumes a [`MicSubscription`] from the shared [`MicBus`]
+//! rather than opening its own mic, so it can run simultaneously with the
+//! wake-word detector off the same audio. The sidecar I/O is blocking, so it
+//! runs on a dedicated writer thread.
+//!
+//! # Feed gating
+//!
+//! The detector is meant to stay *warm* for a whole session (model loaded,
+//! no cold start). To keep it from transcribing the wake word or the agent's
+//! own playback, the writer thread is gated: when the gate is closed it
+//! streams silence (int16 zeros) instead of real audio, which keeps the
+//! sidecar's VAD calibrated without producing any transcript. The caller
+//! opens the gate ([`SttDetector::set_listening`]) exactly when the state
+//! machine enters `Listening`, and closes it when the utterance completes.
 
 use crate::config::SttConfig;
-use crate::mic::Mic;
+use crate::mic_bus::MicSubscription;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use thiserror::Error;
 
@@ -23,36 +35,53 @@ use thiserror::Error;
 pub enum SttError {
     #[error("failed to spawn STT sidecar: {0}")]
     Spawn(#[from] std::io::Error),
-    #[error("mic error: {0}")]
-    Mic(#[from] crate::mic::MicError),
+}
+
+/// An event emitted by the STT sidecar.
+#[derive(Debug, Clone)]
+pub enum SttEvent {
+    /// A completed utterance (the text after `FINAL `).
+    Final(String),
+    /// Speech is in progress (a `PARTIAL` line was emitted). Used as an
+    /// activity signal so the caller can reset an inactivity deadline while
+    /// the user is still speaking.
+    Partial,
 }
 
 /// A running STT detector.
 ///
-/// Holds the sidecar child process and the worker threads. Completed
-/// utterances are delivered on the `mpsc::Receiver<String>` returned by
+/// Holds the sidecar child process and the worker threads. Events are
+/// delivered on the `mpsc::Receiver<SttEvent>` returned by
 /// [`SttDetector::start`].
 pub struct SttDetector {
     child: Child,
     writer: Option<thread::JoinHandle<()>>,
     reader: Option<thread::JoinHandle<()>>,
     stderr_reader: Option<thread::JoinHandle<()>>,
+    /// Feed gate: `false` = stream silence, `true` = stream real audio.
+    gate: Arc<AtomicBool>,
 }
 
 impl SttDetector {
-    /// Spawn the sidecar, start the mic, and begin streaming audio to it.
+    /// Spawn the sidecar and begin streaming audio to it from `sub`.
     ///
-    /// Returns the detector (for lifecycle) and a receiver that yields one
-    /// `String` per completed utterance (the text after `FINAL `). Blocks
-    /// until the mic is confirmed open (or fails), so a missing device /
-    /// denied permission surfaces as an error here rather than silently.
+    /// Returns the detector (for lifecycle) and a receiver that yields
+    /// [`SttEvent`]s: `Final` for each completed utterance, `Partial` for
+    /// each in-progress transcript update. The mic itself is owned by the
+    /// shared [`MicBus`], which is already confirmed open before this is
+    /// called.
+    ///
+    /// The detector starts with the feed gate **closed** (streaming silence),
+    /// so nothing is transcribed until the caller opens it with
+    /// [`SttDetector::set_listening`].
     ///
     /// `on_log` is invoked (from the sidecar's stderr reader thread) with
     /// each log line, so the caller can surface sidecar diagnostics in the UI.
     pub fn start(
         cfg: &SttConfig,
+        sub: MicSubscription,
         on_log: impl Fn(String) + Send + Clone + 'static,
-    ) -> Result<(Self, mpsc::Receiver<String>), SttError> {
+    ) -> Result<(Self, mpsc::Receiver<SttEvent>), SttError> {
         let mut child = Command::new(&cfg.python)
             .arg(&cfg.sidecar_path)
             .arg("--language")
@@ -83,24 +112,25 @@ impl SttDetector {
             ))
         })?;
 
-        let (final_tx, final_rx) = mpsc::channel::<String>();
+        let (event_tx, event_rx) = mpsc::channel::<SttEvent>();
 
-        // Writer thread: creates the Mic *here* (so it stays on this thread),
-        // then streams f32 chunks -> int16 PCM bytes -> sidecar stdin.
-        let (ready_tx, ready_rx) = mpsc::channel::<Result<(), crate::mic::MicError>>();
+        // Feed gate: starts closed (silence) so the wake word never reaches
+        // STT. The conversation loop opens it when the machine enters
+        // Listening.
+        let gate = Arc::new(AtomicBool::new(false));
+
+        // Writer thread: streams f32 chunks -> int16 PCM bytes -> sidecar
+        // stdin. When the gate is closed it writes silence instead of real
+        // audio, keeping the sidecar's VAD calibrated without transcribing.
+        let gate_for_writer = gate.clone();
         let writer = thread::spawn(move || {
-            let mic = match Mic::start() {
-                Ok(m) => m,
-                Err(e) => {
-                    let _ = ready_tx.send(Err(e));
-                    return;
-                }
-            };
-            let _ = ready_tx.send(Ok(()));
-
             let mut stdin = stdin;
-            while let Ok(chunk) = mic.next_chunk() {
-                let bytes = f32_to_i16_bytes(&chunk);
+            while let Ok(chunk) = sub.next_chunk() {
+                let bytes = if gate_for_writer.load(Ordering::Relaxed) {
+                    f32_to_i16_bytes(&chunk)
+                } else {
+                    vec![0u8; chunk.len() * 2] // silence (int16 zeros)
+                };
                 if stdin.write_all(&bytes).is_err() {
                     // Sidecar died (or was killed) — stop streaming.
                     break;
@@ -108,32 +138,21 @@ impl SttDetector {
             }
         });
 
-        // Wait for the mic to open (or fail) before returning.
-        match ready_rx.recv() {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(SttError::Mic(e));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(SttError::Spawn(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "mic thread exited before reporting readiness",
-                )));
-            }
-        }
-
-        // Reader thread: sidecar stdout lines -> completed utterances.
+        // Reader thread: sidecar stdout lines -> events.
         let reader = thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
                 match line {
                     Ok(l) => {
                         if let Some(text) = l.strip_prefix("FINAL ") {
-                            if final_tx.send(text.trim().to_string()).is_err() {
+                            if event_tx
+                                .send(SttEvent::Final(text.trim().to_string()))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        } else if l.starts_with("PARTIAL ") {
+                            if event_tx.send(SttEvent::Partial).is_err() {
                                 break;
                             }
                         }
@@ -160,9 +179,16 @@ impl SttDetector {
                 writer: Some(writer),
                 reader: Some(reader),
                 stderr_reader: Some(stderr_reader),
+                gate,
             },
-            final_rx,
+            event_rx,
         ))
+    }
+
+    /// Open or close the feed gate. When `listening` is true, real mic audio
+    /// reaches the sidecar; when false, silence is streamed instead.
+    pub fn set_listening(&self, listening: bool) {
+        self.gate.store(listening, Ordering::Relaxed);
     }
 
     /// Kill the sidecar and join the worker threads.
