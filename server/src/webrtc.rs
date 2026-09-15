@@ -82,6 +82,9 @@ struct Handler {
     pipeline: Arc<Pipeline>,
     ice: Arc<IceState>,
     connection_state: Arc<Mutex<RTCPeerConnectionState>>,
+    /// Populated after the peer connection is built; lets the data-channel
+    /// handler close the pc when the client disconnects.
+    pc: Arc<Mutex<Option<Arc<dyn PeerConnection>>>>,
 }
 
 #[async_trait::async_trait]
@@ -104,6 +107,7 @@ impl PeerConnectionEventHandler for Handler {
 
     async fn on_data_channel(&self, data_channel: Arc<dyn DataChannel>) {
         let pipeline = self.pipeline.clone();
+        let pc = self.pc.clone();
         tokio::spawn(async move {
             // Per-session conversational history. Each data channel is one
             // client session, so the history lives here and accumulates
@@ -130,6 +134,13 @@ impl PeerConnectionEventHandler for Handler {
                     _ => {}
                 }
             }
+            // The client is gone: close our peer connection so the signaling
+            // layer can prune this session and free its UDP port for the next
+            // connection.
+            let pc_to_close = pc.lock().unwrap().clone();
+            if let Some(pc) = pc_to_close {
+                let _ = pc.close().await;
+            }
         });
     }
 }
@@ -152,10 +163,12 @@ impl WebRtcServer {
     ) -> webrtc::error::Result<Self> {
         let ice = Arc::new(IceState::default());
         let connection_state = Arc::new(Mutex::new(RTCPeerConnectionState::New));
+        let pc_handle: Arc<Mutex<Option<Arc<dyn PeerConnection>>>> = Arc::new(Mutex::new(None));
         let handler = Arc::new(Handler {
             pipeline,
             ice: ice.clone(),
             connection_state: connection_state.clone(),
+            pc: pc_handle.clone(),
         });
         let ice_servers = config
             .stun_servers
@@ -168,14 +181,19 @@ impl WebRtcServer {
         let rtc_config = RTCConfigurationBuilder::default()
             .with_ice_servers(ice_servers)
             .build();
-        let pc = PeerConnectionBuilder::new()
-            .with_configuration(rtc_config)
-            .with_handler(handler)
-            .with_udp_addrs(vec![format!("0.0.0.0:{}", config.listen_port)])
-            .build()
-            .await?;
+        let pc: Arc<dyn PeerConnection> = Arc::new(
+            PeerConnectionBuilder::new()
+                .with_configuration(rtc_config)
+                .with_handler(handler)
+                .with_udp_addrs(vec![format!("0.0.0.0:{}", config.listen_port)])
+                .build()
+                .await?,
+        );
+        // Give the data-channel handler a handle to the pc so it can close
+        // the connection when the client disconnects.
+        *pc_handle.lock().unwrap() = Some(pc.clone());
         Ok(Self {
-            pc: Arc::new(pc),
+            pc,
             ice,
             connection_state,
         })

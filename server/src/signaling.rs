@@ -56,13 +56,16 @@ pub struct SignalingState {
 }
 
 impl SignalingState {
-    /// Drop sessions whose peer connection has permanently ended.
+    /// Drop sessions whose peer connection has ended.
     ///
-    /// A session is dead when its connection state is `Closed` (we closed it)
-    /// or `Failed` (the remote peer went away and ICE could not recover).
-    /// `Disconnected` is deliberately *not* pruned: it is a transient state
-    /// that ICE may recover from automatically, and pruning it would kill a
-    /// live session during a brief network blip.
+    /// A session is dead when its connection state is `Closed` (we closed it),
+    /// `Failed` (the remote peer went away and ICE could not recover), or
+    /// `Disconnected` (the client disconnected and will not return). We prune
+    /// `Disconnected` because a gone client leaves the server's peer
+    /// connection stuck in that state forever, and its UDP socket keeps the
+    /// fixed `listen_port` bound — which blocks the next client from
+    /// connecting. A brief network blip is handled by the client simply
+    /// reconnecting with a fresh offer.
     fn prune_dead_sessions(&self) {
         self.sessions
             .lock()
@@ -70,7 +73,9 @@ impl SignalingState {
             .retain(|server| {
                 !matches!(
                     server.connection_state(),
-                    RTCPeerConnectionState::Closed | RTCPeerConnectionState::Failed
+                    RTCPeerConnectionState::Disconnected
+                        | RTCPeerConnectionState::Closed
+                        | RTCPeerConnectionState::Failed
                 )
             });
     }
@@ -141,6 +146,12 @@ async fn handle_offer(
     let msg: SignalingMessage = serde_json::from_slice(&body)
         .map_err(|_| (StatusCode::BAD_REQUEST, String::new()))?;
 
+    // Prune dead sessions BEFORE binding the new peer connection, so a stale
+    // session's UDP socket (still bound to the fixed `listen_port`) is freed
+    // before we try to rebind it. Otherwise the bind fails with "address
+    // already in use" and the client cannot reconnect.
+    state.prune_dead_sessions();
+
     // A fresh peer connection per offer — a `pc` is single-peer.
     let server = Arc::new(
         WebRtcServer::new(&state.webrtc_config, state.pipeline.clone())
@@ -152,9 +163,8 @@ async fn handle_offer(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Prune sessions whose peer connection has ended, then retain the new
-    // connection so its data channel stays alive for the session.
-    state.prune_dead_sessions();
+    // Retain the new connection so its data channel stays alive for the
+    // session.
     state.sessions.lock().unwrap().push(server);
 
     Ok(Json(answer))
