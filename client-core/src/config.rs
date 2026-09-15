@@ -147,6 +147,12 @@ pub struct ConversationConfig {
     /// client returns to cold (wake word required again). Distinct from
     /// `silence_timeout_secs`, which bounds a single in-flight utterance.
     pub inactivity_timeout_secs: u64,
+    /// Pre-roll buffer length (seconds): how much audio the STT detector
+    /// keeps in a rolling buffer so that, on a cold listen (right after the
+    /// wake word), the audio between the wake word and the `WAKE` event can
+    /// be drained into STT before live audio resumes. This is what prevents
+    /// the first word of the query from being clipped by detection latency.
+    pub pre_roll_secs: f32,
 }
 
 impl Default for ConversationConfig {
@@ -155,6 +161,7 @@ impl Default for ConversationConfig {
             auto_start: false,
             silence_timeout_secs: 15,
             inactivity_timeout_secs: 5,
+            pre_roll_secs: 1.5,
         }
     }
 }
@@ -216,5 +223,6 @@ mod tests {
         assert!(!cfg.conversation.auto_start);
         assert_eq!(cfg.conversation.silence_timeout_secs, 15);
         assert_eq!(cfg.conversation.inactivity_timeout_secs, 5);
+        assert_eq!(cfg.conversation.pre_roll_secs, 1.5);
     }
 }

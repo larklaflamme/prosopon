@@ -371,7 +371,7 @@ fn run_conversation_loop(app: AppHandle) {
         // the user's first utterance.
         let stt_sub = bus.subscribe();
         let app_for_log = app.clone();
-        let (stt, stt_rx) = match SttDetector::start(&config.stt, stt_sub, move |line| {
+        let (stt, stt_rx) = match SttDetector::start(&config.stt, config.conversation.pre_roll_secs, stt_sub, move |line| {
             emit_log(&app_for_log, "info", "stt", line);
         }) {
             Ok(x) => x,
@@ -423,12 +423,19 @@ fn run_conversation_loop(app: AppHandle) {
             // timeout.
             let mut first_turn = true;
             loop {
+                let is_first = first_turn;
                 let timeout = if first_turn { silence_timeout } else { inactivity_timeout };
                 first_turn = false;
 
                 // Open the STT feed gate. STT is already warm; opening the
-                // gate lets real audio flow immediately.
-                stt.set_listening(true);
+                // gate lets real audio flow immediately. On the first (cold)
+                // turn, drain the pre-roll buffer first so the first word of
+                // the query isn't clipped by wake-word detection latency.
+                if is_first {
+                    stt.set_listening_with_pre_roll();
+                } else {
+                    stt.set_listening(true);
+                }
                 emit_log(&app, "info", "conversation", "listening for utterance");
 
                 // Wait for a completed utterance, resetting the inactivity
@@ -465,7 +472,7 @@ fn run_conversation_loop(app: AppHandle) {
                     }
                 };
                 let text = match text {
-                    Ok(t) => t,
+                    Ok(t) => strip_wake_word(&t, &config.wake_word.model),
                     Err(()) => break,
                 };
                 stt.set_listening(false);
@@ -614,6 +621,24 @@ fn run_conversation_loop(app: AppHandle) {
             }
         }
     });
+}
+
+/// Strip a leading wake-word phrase (e.g. "hey jarvis") from a transcript,
+/// case-insensitively. The pre-roll buffer feeds the wake word into STT, so
+/// the first utterance may begin with it; the server tolerates it, but
+/// stripping it here keeps the transcript clean.
+fn strip_wake_word(text: &str, wake_word_model: &str) -> String {
+    let phrase = wake_word_model.replace('_', " ");
+    let lower = text.to_lowercase();
+    let lower_phrase = phrase.to_lowercase();
+    if let Some(idx) = lower.find(&lower_phrase) {
+        let prefix = &text[..idx];
+        if prefix.trim().is_empty() {
+            let rest = &text[idx + lower_phrase.len()..];
+            return rest.trim_start().to_string();
+        }
+    }
+    text.to_string()
 }
 
 /// Return the state machine to Idle after an aborted listen/think.

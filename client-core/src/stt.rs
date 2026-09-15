@@ -21,9 +21,22 @@
 //! sidecar's VAD calibrated without producing any transcript. The caller
 //! opens the gate ([`SttDetector::set_listening`]) exactly when the state
 //! machine enters `Listening`, and closes it when the utterance completes.
+//!
+//! # Pre-roll buffer
+//!
+//! Wake-word detection has latency: by the time the `WAKE` event fires, the
+//! user is already saying the query. The writer thread therefore maintains a
+//! rolling buffer of the last `pre_roll_secs` of real audio (even while
+//! gated). On a *cold* listen — the first listen after a wake word — the
+//! caller uses [`SttDetector::set_listening_with_pre_roll`], which drains
+//! that buffer into the sidecar before live audio resumes, so the first word
+//! of the query isn't clipped. Warm turns use [`SttDetector::set_listening`]
+//! and do *not* drain (the buffer would hold the agent's own playback echo).
 
 use crate::config::SttConfig;
+use crate::mic::SAMPLE_RATE;
 use crate::mic_bus::MicSubscription;
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,6 +73,9 @@ pub struct SttDetector {
     stderr_reader: Option<thread::JoinHandle<()>>,
     /// Feed gate: `false` = stream silence, `true` = stream real audio.
     gate: Arc<AtomicBool>,
+    /// One-shot pre-roll drain flag: when set, the writer drains the
+    /// pre-roll buffer into the sidecar before the next live chunk.
+    drain_pre_roll: Arc<AtomicBool>,
 }
 
 impl SttDetector {
@@ -75,10 +91,15 @@ impl SttDetector {
     /// so nothing is transcribed until the caller opens it with
     /// [`SttDetector::set_listening`].
     ///
+    /// `pre_roll_secs` sizes the rolling pre-roll buffer: the writer keeps
+    /// the last `pre_roll_secs` of real audio in memory so a cold listen can
+    /// drain it (see [`SttDetector::set_listening_with_pre_roll`]).
+    ///
     /// `on_log` is invoked (from the sidecar's stderr reader thread) with
     /// each log line, so the caller can surface sidecar diagnostics in the UI.
     pub fn start(
         cfg: &SttConfig,
+        pre_roll_secs: f32,
         sub: MicSubscription,
         on_log: impl Fn(String) + Send + Clone + 'static,
     ) -> Result<(Self, mpsc::Receiver<SttEvent>), SttError> {
@@ -118,15 +139,47 @@ impl SttDetector {
         // STT. The conversation loop opens it when the machine enters
         // Listening.
         let gate = Arc::new(AtomicBool::new(false));
+        // Pre-roll drain: one-shot, consumed by the writer on a cold listen.
+        let drain_pre_roll = Arc::new(AtomicBool::new(false));
+
+        // Pre-roll buffer capacity, in samples.
+        let pre_roll_samples = (pre_roll_secs * SAMPLE_RATE as f32) as usize;
 
         // Writer thread: streams f32 chunks -> int16 PCM bytes -> sidecar
         // stdin. When the gate is closed it writes silence instead of real
         // audio, keeping the sidecar's VAD calibrated without transcribing.
+        //
+        // It also maintains a rolling pre-roll buffer of the last
+        // `pre_roll_secs` of real audio. On a cold listen (drain flag set),
+        // the buffer is drained into the sidecar before live audio resumes,
+        // so the first word of the query isn't clipped by detection latency.
         let gate_for_writer = gate.clone();
+        let drain_for_writer = drain_pre_roll.clone();
         let writer = thread::spawn(move || {
             let mut stdin = stdin;
+            let mut pre_roll: VecDeque<Vec<f32>> = VecDeque::new();
+            let mut pre_roll_len = 0usize;
+
             while let Ok(chunk) = sub.next_chunk() {
-                let bytes = if gate_for_writer.load(Ordering::Relaxed) {
+                let listening = gate_for_writer.load(Ordering::Relaxed);
+                let drain = drain_for_writer.swap(false, Ordering::Relaxed);
+
+                // Cold listen: drain the pre-roll buffer (audio captured
+                // before this chunk) into the sidecar first, so the wake
+                // word + the start of the query reach STT before live audio.
+                if listening && drain {
+                    for buffered in pre_roll.drain(..) {
+                        let bytes = f32_to_i16_bytes(&buffered);
+                        if stdin.write_all(&bytes).is_err() {
+                            return;
+                        }
+                    }
+                    pre_roll_len = 0;
+                }
+
+                // Write the current chunk: real audio when listening,
+                // silence otherwise.
+                let bytes = if listening {
                     f32_to_i16_bytes(&chunk)
                 } else {
                     vec![0u8; chunk.len() * 2] // silence (int16 zeros)
@@ -134,6 +187,17 @@ impl SttDetector {
                 if stdin.write_all(&bytes).is_err() {
                     // Sidecar died (or was killed) — stop streaming.
                     break;
+                }
+
+                // Maintain the pre-roll buffer (always, even while gated, so
+                // the audio around the wake word is captured).
+                let chunk_len = chunk.len();
+                pre_roll.push_back(chunk);
+                pre_roll_len += chunk_len;
+                while pre_roll_len > pre_roll_samples {
+                    if let Some(front) = pre_roll.pop_front() {
+                        pre_roll_len -= front.len();
+                    }
                 }
             }
         });
@@ -180,6 +244,7 @@ impl SttDetector {
                 reader: Some(reader),
                 stderr_reader: Some(stderr_reader),
                 gate,
+                drain_pre_roll,
             },
             event_rx,
         ))
@@ -189,6 +254,15 @@ impl SttDetector {
     /// reaches the sidecar; when false, silence is streamed instead.
     pub fn set_listening(&self, listening: bool) {
         self.gate.store(listening, Ordering::Relaxed);
+    }
+
+    /// Open the feed gate and first drain the pre-roll buffer (the audio
+    /// captured since the wake word) into the sidecar, so the first word of
+    /// the query isn't clipped. Use this for the *cold* transition (wake
+    /// word → first listen); warm turns use [`SttDetector::set_listening`].
+    pub fn set_listening_with_pre_roll(&self) {
+        self.drain_pre_roll.store(true, Ordering::Relaxed);
+        self.gate.store(true, Ordering::Relaxed);
     }
 
     /// Kill the sidecar and join the worker threads.
