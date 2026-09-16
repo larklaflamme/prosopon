@@ -21,3 +21,9 @@ signaling:
   tls:                                 # HTTPS for the signaling endpoint (recommended for direct connection)
     cert: "/etc/letsencrypt/live/ac1.ravennest.science/fullchain.pem"   # path to fullchain.pem; empty = plain HTTP (localhost dev)
     key:  "/etc/letsencrypt/live/ac1.ravennest.science/privkey.pem"     # path to privkey.pem; empty = plain HTTP (localhost dev)
+
+a2f:
+  enabled: true
+  bridge_path: "../a2f-bridge/target/debug/a2f-bridge"   # relative to the server working dir
+  endpoint: "http://localhost:52000"                     # the A2F NIM gRPC endpoint
+  timeout_secs: 3                                         # give up after 3s -> audio-only fallback

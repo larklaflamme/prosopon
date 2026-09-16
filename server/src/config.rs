@@ -17,6 +17,7 @@ pub struct Config {
     pub webrtc: WebrtcConfig,
     pub signaling: SignalingConfig,
     pub web_search: WebSearchConfig,
+    pub a2f: A2fConfig,
 }
 
 impl Default for Config {
@@ -27,6 +28,7 @@ impl Default for Config {
             webrtc: WebrtcConfig::default(),
             signaling: SignalingConfig::default(),
             web_search: WebSearchConfig::default(),
+            a2f: A2fConfig::default(),
         }
     }
 }
@@ -198,6 +200,36 @@ impl From<std::io::Error> for ConfigError {
 impl From<serde_yaml::Error> for ConfigError {
     fn from(e: serde_yaml::Error) -> Self {
         ConfigError::Parse(e)
+    }
+}
+
+/// Audio2Face-3D bridge settings (Phase 2).
+///
+/// The bridge converts the TTS WAV into ARKit blendshape frames. When
+/// `enabled` is false (or the bridge fails), the pipeline skips blendshape
+/// generation and the avatar degrades to audio-only — never breaking the
+/// voice loop.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct A2fConfig {
+    /// Whether to run the A2F bridge at all.
+    pub enabled: bool,
+    /// Path to the `a2f-bridge` binary (relative to the server working dir).
+    pub bridge_path: String,
+    /// The A2F NIM gRPC endpoint.
+    pub endpoint: String,
+    /// How long to wait for the bridge to produce frames before giving up.
+    pub timeout_secs: u64,
+}
+
+impl Default for A2fConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            bridge_path: "../a2f-bridge/target/debug/a2f-bridge".into(),
+            endpoint: "http://localhost:52000".into(),
+            timeout_secs: 3,
+        }
     }
 }
 

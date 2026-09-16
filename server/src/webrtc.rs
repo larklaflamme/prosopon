@@ -60,6 +60,38 @@ async fn send_audio(channel: &Arc<dyn DataChannel>, audio: &[u8]) -> webrtc::err
     Ok(())
 }
 
+/// Send a blendshape track (NDJSON text) over the blendshapes data channel as
+/// a length-prefixed sequence of chunks: a text header `blendshapes:<n>`
+/// followed by binary chunks of the UTF-8 bytes. Mirrors `send_audio` so the
+/// client can reuse the same reassembly logic.
+async fn send_blendshapes(channel: &Arc<dyn DataChannel>, track: &str) -> webrtc::error::Result<()> {
+    channel.send_text(&format!("blendshapes:{}", track.len())).await?;
+    for chunk in track.as_bytes().chunks(AUDIO_CHUNK_SIZE) {
+        let mut buf = BytesMut::with_capacity(chunk.len());
+        buf.extend_from_slice(chunk);
+        channel.send(buf).await?;
+    }
+    Ok(())
+}
+
+/// Wait for a data channel to open, bounded by `timeout`. Returns `true` if it
+/// opened, `false` on close/error/timeout.
+async fn wait_for_open(channel: &Arc<dyn DataChannel>, timeout: Duration) -> bool {
+    let result = tokio::time::timeout(timeout, async {
+        loop {
+            match channel.poll().await {
+                Some(DataChannelEvent::OnOpen) => return true,
+                Some(DataChannelEvent::OnClose) | Some(DataChannelEvent::OnError) | None => {
+                    return false;
+                }
+                Some(_) => {}
+            }
+        }
+    })
+    .await;
+    result.unwrap_or(false)
+}
+
 /// Shared ICE state: the candidates gathered so far, plus a flag set when
 /// gathering completes.
 struct IceState {
@@ -108,6 +140,31 @@ impl PeerConnectionEventHandler for Handler {
     async fn on_data_channel(&self, data_channel: Arc<dyn DataChannel>) {
         let pipeline = self.pipeline.clone();
         let pc = self.pc.clone();
+
+        // Create the server-initiated blendshapes channel (the second data
+        // channel on the same peer connection — no new network surface, no new
+        // port). If it fails to open, `blendshapes_channel` is `None` and the
+        // avatar degrades to audio-only.
+        let blendshapes_channel = {
+            // Clone the Arc out of the mutex and drop the guard before the
+            // `.await` below (a MutexGuard is not Send).
+            let pc_clone = pc.lock().unwrap().clone();
+            match pc_clone {
+                Some(pc) => match pc.create_data_channel("blendshapes", None).await {
+                    Ok(ch) if wait_for_open(&ch, Duration::from_secs(10)).await => Some(ch),
+                    Ok(_) => {
+                        eprintln!("blendshapes channel failed to open; avatar disabled");
+                        None
+                    }
+                    Err(e) => {
+                        eprintln!("failed to create blendshapes channel: {e}");
+                        None
+                    }
+                },
+                None => None,
+            }
+        };
+
         tokio::spawn(async move {
             // Per-session conversational history. Each data channel is one
             // client session, so the history lives here and accumulates
@@ -123,6 +180,11 @@ impl PeerConnectionEventHandler for Handler {
                                 history.push(ChatMessage::assistant(out.reply.clone()));
                                 if let Err(e) = send_audio(&data_channel, &out.audio).await {
                                     eprintln!("failed to send audio over data channel: {e}");
+                                }
+                                if let (Some(ch), Some(bs)) = (&blendshapes_channel, &out.blendshapes) {
+                                    if let Err(e) = send_blendshapes(ch, bs).await {
+                                        eprintln!("failed to send blendshapes over data channel: {e}");
+                                    }
                                 }
                             }
                             Err(e) => {

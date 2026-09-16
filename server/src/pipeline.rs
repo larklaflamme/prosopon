@@ -18,6 +18,7 @@
 //! answer. The loop is bounded (`MAX_TOOL_ROUNDS`) to prevent runaway
 //! tool-calling.
 
+use crate::a2f::A2fClient;
 use crate::cognition::{ChatMessage, ChatReply, CognitionClient, CognitionError, Tool, ToolCall, ToolFunction};
 use crate::config::Config;
 use crate::tts::{TtsClient, TtsError};
@@ -44,6 +45,9 @@ pub struct PipelineOutput {
     pub reply: String,
     /// The full WAV stream for `reply`.
     pub audio: Vec<u8>,
+    /// The ARKit blendshape track (NDJSON) for `reply`, or `None` if A2F is
+    /// disabled or failed. The avatar degrades to audio-only when `None`.
+    pub blendshapes: Option<String>,
 }
 
 /// Errors that can occur while running a pipeline turn.
@@ -92,6 +96,7 @@ pub struct Pipeline {
     cognition: CognitionClient,
     tts: TtsClient,
     web_search: WebSearchClient,
+    a2f: A2fClient,
 }
 
 impl Pipeline {
@@ -101,6 +106,7 @@ impl Pipeline {
             cognition: CognitionClient::new(&config.cognition),
             tts: TtsClient::new(&config.tts),
             web_search: WebSearchClient::new(&config.web_search),
+            a2f: A2fClient::new(&config.a2f),
         }
     }
 
@@ -146,7 +152,8 @@ impl Pipeline {
         }
 
         let audio = self.tts.synthesize(&reply).await?;
-        Ok(PipelineOutput { reply, audio })
+        let blendshapes = self.a2f.synthesize_blendshapes(&audio).await;
+        Ok(PipelineOutput { reply, audio, blendshapes })
     }
 
     /// The `web_search` tool definition offered to the model.

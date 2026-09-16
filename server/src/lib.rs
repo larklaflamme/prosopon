@@ -2,6 +2,7 @@
 //!
 //! Exposes the modules shared between the binary and the integration tests.
 
+pub mod a2f;
 pub mod cognition;
 pub mod config;
 pub mod pipeline;
