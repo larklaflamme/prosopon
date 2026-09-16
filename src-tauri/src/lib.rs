@@ -31,6 +31,14 @@ struct LogEvent {
     message: String,
 }
 
+/// A single level-meter sample: user (mic) and agent (playback) RMS levels,
+/// each in 0..1. Emitted ~10x/sec to drive the spectrum widget.
+#[derive(Clone, serde::Serialize)]
+struct LevelEvent {
+    user: f32,
+    agent: f32,
+}
+
 pub struct AppState {
     machine: Mutex<StateMachine>,
     /// The connected WebRTC client, if any. `Arc` so commands can clone it
@@ -43,6 +51,9 @@ pub struct AppState {
     /// stopped on disconnect). The standalone wake-word path owns one; the
     /// conversation loop owns its own local bus.
     mic_bus: Mutex<Option<MicBus>>,
+    /// Live RMS level of the agent's playback (0..1), updated by the playback
+    /// source wrapper and read by the level-meter thread.
+    agent_level: Arc<Mutex<f32>>,
     /// Ring buffer of recent log lines, so the webview can backfill on load.
     logs: Mutex<VecDeque<LogEvent>>,
 }
@@ -69,6 +80,32 @@ fn emit_log(app: &AppHandle, level: &str, source: &str, message: impl Into<Strin
         }
     }
     let _ = app.emit("log", event);
+}
+
+/// Subscribe a level-meter thread to a mic bus: compute the user's RMS level
+/// ~10x/sec and emit a `levels` event (user + agent) to the webview.
+fn spawn_level_meter(app: &AppHandle, bus: &MicBus) {
+    let sub = bus.subscribe();
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let mut acc: f64 = 0.0;
+        let mut n: u64 = 0;
+        let mut last = std::time::Instant::now();
+        while let Ok(chunk) = sub.next_chunk() {
+            for &s in &chunk {
+                acc += (s as f64) * (s as f64);
+            }
+            n += chunk.len() as u64;
+            if last.elapsed() >= std::time::Duration::from_millis(100) {
+                let rms = if n == 0 { 0.0 } else { (acc / n as f64).sqrt() as f32 };
+                acc = 0.0;
+                n = 0;
+                last = std::time::Instant::now();
+                let agent = *app.state::<AppState>().agent_level.lock().unwrap();
+                let _ = app.emit("levels", LevelEvent { user: rms, agent });
+            }
+        }
+    });
 }
 
 /// Load the client config from `client/config.yaml`, trying a few candidate
@@ -282,6 +319,7 @@ fn start_wake_word_inner(app: &AppHandle) -> Result<(), String> {
         emit_log(app, "error", "wake_word", format!("mic bus failed: {e}"));
         e.to_string()
     })?;
+    spawn_level_meter(app, &bus);
     let sub = bus.subscribe();
 
     let app_for_log = (*app).clone();
@@ -375,6 +413,7 @@ fn run_conversation_loop(app: AppHandle) {
             }
         };
         emit_log(&app, "info", "conversation", "mic bus open (AEC)");
+        spawn_level_meter(&app, &bus);
 
         // Start the STT detector ONCE, warm, with the feed gate closed. It
         // stays alive for the whole session; the gate controls whether it
@@ -577,7 +616,8 @@ fn run_conversation_loop(app: AppHandle) {
                             }
                         }
                         // --- Play (interruptible for barge-in) ---
-                        let playback = match prosopon_client_core::playback::Playback::start_with_reference(&bytes, Arc::clone(&reference)) {
+                        let agent_level = app.state::<AppState>().agent_level.clone();
+                        let playback = match prosopon_client_core::playback::Playback::start_with_reference_and_level(&bytes, Arc::clone(&reference), agent_level) {
                             Ok(p) => p,
                             Err(e) => {
                                 emit_log(&app, "error", "playback", format!("playback failed: {e}"));
@@ -632,6 +672,7 @@ fn run_conversation_loop(app: AppHandle) {
                             }
                         }
                         ww.stop();
+                        *app.state::<AppState>().agent_level.lock().unwrap() = 0.0;
 
                         if barged {
                             {
@@ -699,6 +740,7 @@ pub fn run() {
             webrtc: Mutex::new(None),
             wake_word: Mutex::new(None),
             mic_bus: Mutex::new(None),
+            agent_level: Arc::new(Mutex::new(0.0)),
             logs: Mutex::new(VecDeque::new()),
         })
         .setup(|app| {

@@ -89,6 +89,12 @@ body {
   justify-content: center;
   gap: 16px;
   min-height: 0;
+  overflow: hidden;
+  --glow: #4a4a55;
+  --glow-soft: rgba(74, 74, 85, 0.28);
+  background: linear-gradient(160deg, #0f1115 0%, #151a24 45%, #0f1115 100%);
+  background-size: 220% 220%;
+  animation: stage-drift 18s ease-in-out infinite;
 }
 
 .orb {
@@ -292,6 +298,20 @@ body {
   letter-spacing: 0.02em;
 }
 
+/* ---- Level meter ---- */
+.level-meter {
+  height: 220px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+  padding: 4px 8px;
+}
+
+.level-meter canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
 /* ---- Transcript ---- */
 .transcript {
   height: 120px;
@@ -468,4 +488,33 @@ body {
 
 .orb.hidden {
   display: none;
+}
+
+
+/* ---- Animated stage background (per-state glow) ---- */
+.orb-stage::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse 70% 55% at 50% 38%, var(--glow-soft), transparent 70%);
+  animation: glow-pulse 6s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.orb-stage[data-state="disconnected"] { --glow: #4a4a55; --glow-soft: rgba(74,74,85,0.35); }
+.orb-stage[data-state="idle"]        { --glow: #5b8def; --glow-soft: rgba(91,141,239,0.55); }
+.orb-stage[data-state="awaking"]     { --glow: #8ab4ff; --glow-soft: rgba(138,180,255,0.65); }
+.orb-stage[data-state="listening"]   { --glow: #3b82f6; --glow-soft: rgba(59,130,246,0.55); }
+.orb-stage[data-state="thinking"]    { --glow: #f59e0b; --glow-soft: rgba(245,158,11,0.55); }
+.orb-stage[data-state="speaking"]    { --glow: #14b8a6; --glow-soft: rgba(20,184,166,0.55); }
+
+@keyframes stage-drift {
+  0%, 100% { background-position: 0% 50%; }
+  50%      { background-position: 100% 50%; }
+}
+
+@keyframes glow-pulse {
+  0%, 100% { opacity: 0.55; transform: scale(1); }
+  50%      { opacity: 1;    transform: scale(1.12); }
 }

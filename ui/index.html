@@ -51,9 +51,11 @@
   </main>
 
   <!-- Transcript (ephemeral — cleared on quit) -->
-  <section class="transcript" id="transcript">
-    <div class="empty-hint">Say &ldquo;Hey Skye&rdquo; to begin.</div>
+  <!-- Level meter: user + agent mic levels over time -->
+  <section class="level-meter" id="level-meter">
+    <canvas id="level-canvas"></canvas>
   </section>
+
 
   <!-- Logs panel (hidden by default; toggle from the bottom bar) -->
   <section class="logs" id="logs" hidden>

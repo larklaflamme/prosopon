@@ -5,6 +5,7 @@ const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 const orb = document.getElementById("orb");
+const orbStage = document.querySelector(".orb-stage");
 const stateLabel = document.getElementById("state-label");
 const statusDot = document.getElementById("status-dot");
 const muteBtn = document.getElementById("btn-mute");
@@ -15,6 +16,7 @@ const logsBody = document.getElementById("logs-body");
 const logsBtn = document.getElementById("btn-logs");
 const clearLogsBtn = document.getElementById("btn-clear-logs");
 const avatarCanvas = document.getElementById("avatar-canvas");
+const levelCanvas = document.getElementById("level-canvas");
 
 const MAX_LOG_LINES = 500;
 
@@ -36,6 +38,7 @@ const STATE_COLORS = {
 function applyState(state) {
   const s = state.state;
   orb.dataset.state = s;
+  orbStage.dataset.state = s;
   stateLabel.textContent = s;
   statusDot.style.background = STATE_COLORS[s] || "#4a4a55";
   orb.classList.toggle("is-muted", state.muted);
@@ -59,6 +62,7 @@ function updateAvatarVisibility() {
 }
 
 function addLine(speaker, text) {
+  if (!transcript) return;
   const hint = transcript.querySelector(".empty-hint");
   if (hint) hint.remove();
 
@@ -139,6 +143,130 @@ async function init() {
     applyState(event.payload);
   });
 
+  // Level meter: user (mic) + agent (playback) levels over time.
+  // Two stacked channels, each a dB grid with a scrolling waveform line.
+  const levelCtx = levelCanvas.getContext("2d");
+  const LEVEL_HISTORY = 160;
+  const userHistory = new Array(LEVEL_HISTORY).fill(0);
+  const agentHistory = new Array(LEVEL_HISTORY).fill(0);
+  const LEVEL_LOW = 0.005;   // below -> yellow (too quiet)
+  const LEVEL_HIGH = 0.05;   // above -> red (too loud)
+  const DB_TOP = 0;          // top of grid (0 dBFS)
+  const DB_BOTTOM = -80;     // bottom of grid
+  const LABEL_GUTTER = 40;   // left margin for dB labels
+
+  function rmsToDb(v) {
+    if (v <= 0) return DB_BOTTOM;
+    const db = 20 * Math.log10(v);
+    return Math.max(DB_BOTTOM, Math.min(DB_TOP, db));
+  }
+
+  function levelColor(v) {
+    if (v < LEVEL_LOW) return "#eab308"; // yellow
+    if (v > LEVEL_HIGH) return "#ef4444"; // red
+    return "#22c55e"; // green (sweet spot)
+  }
+
+  function sizeLevelCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    const w = levelCanvas.clientWidth;
+    const h = levelCanvas.clientHeight;
+    levelCanvas.width = Math.max(1, Math.floor(w * dpr));
+    levelCanvas.height = Math.max(1, Math.floor(h * dpr));
+    levelCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function drawGrid(w, y0, stripH) {
+    levelCtx.font = "9px sans-serif";
+    levelCtx.textBaseline = "middle";
+    for (let db = DB_TOP; db >= DB_BOTTOM; db -= 20) {
+      const y = y0 + ((DB_TOP - db) / (DB_TOP - DB_BOTTOM)) * stripH;
+      levelCtx.strokeStyle = "rgba(255,255,255,0.08)";
+      levelCtx.beginPath();
+      levelCtx.moveTo(LABEL_GUTTER, y);
+      levelCtx.lineTo(w, y);
+      levelCtx.stroke();
+      levelCtx.fillStyle = "rgba(255,255,255,0.4)";
+      levelCtx.fillText(db + " dB", 4, y);
+    }
+    for (let i = 1; i < 4; i++) {
+      const x = LABEL_GUTTER + ((w - LABEL_GUTTER) / 4) * i;
+      levelCtx.strokeStyle = "rgba(255,255,255,0.04)";
+      levelCtx.beginPath();
+      levelCtx.moveTo(x, y0);
+      levelCtx.lineTo(x, y0 + stripH);
+      levelCtx.stroke();
+    }
+  }
+
+  function drawWaveform(history, y0, stripH, fillColor) {
+    const w = levelCanvas.clientWidth;
+    const n = history.length;
+    const plotW = w - LABEL_GUTTER;
+    const stepX = plotW / (n - 1);
+    const pts = [];
+    for (let i = 0; i < n; i++) {
+      const db = rmsToDb(history[i]);
+      const y = y0 + ((DB_TOP - db) / (DB_TOP - DB_BOTTOM)) * stripH;
+      pts.push([LABEL_GUTTER + i * stepX, y]);
+    }
+    // filled area under the line
+    levelCtx.beginPath();
+    levelCtx.moveTo(pts[0][0], y0 + stripH);
+    for (const p of pts) levelCtx.lineTo(p[0], p[1]);
+    levelCtx.lineTo(pts[n - 1][0], y0 + stripH);
+    levelCtx.closePath();
+    levelCtx.fillStyle = fillColor + "22";
+    levelCtx.fill();
+    // the line itself, colored by zone per segment
+    levelCtx.lineWidth = 1.5;
+    for (let i = 1; i < n; i++) {
+      levelCtx.strokeStyle = levelColor(history[i]);
+      levelCtx.beginPath();
+      levelCtx.moveTo(pts[i - 1][0], pts[i - 1][1]);
+      levelCtx.lineTo(pts[i][0], pts[i][1]);
+      levelCtx.stroke();
+    }
+  }
+
+  function drawLevels() {
+    const w = levelCanvas.clientWidth;
+    const h = levelCanvas.clientHeight;
+    levelCtx.clearRect(0, 0, w, h);
+    const stripH = h / 2;
+    drawGrid(w, 0, stripH);
+    drawGrid(w, stripH, stripH);
+    drawWaveform(userHistory, 0, stripH, "#5b8def");
+    drawWaveform(agentHistory, stripH, stripH, "#14b8a6");
+    // channel labels
+    levelCtx.fillStyle = "rgba(255,255,255,0.65)";
+    levelCtx.font = "10px sans-serif";
+    levelCtx.textBaseline = "alphabetic";
+    levelCtx.fillText("you", LABEL_GUTTER + 4, stripH - 4);
+    levelCtx.fillText("sky", LABEL_GUTTER + 4, h - 4);
+    // live dB readouts
+    const userDb = rmsToDb(userHistory[userHistory.length - 1]);
+    const agentDb = rmsToDb(agentHistory[agentHistory.length - 1]);
+    levelCtx.fillStyle = "rgba(255,255,255,0.5)";
+    levelCtx.font = "10px sans-serif";
+    levelCtx.textAlign = "right";
+    levelCtx.fillText(userDb.toFixed(1) + " dB", w - 4, stripH - 4);
+    levelCtx.fillText(agentDb.toFixed(1) + " dB", w - 4, h - 4);
+    levelCtx.textAlign = "left";
+  }
+
+  sizeLevelCanvas();
+  window.addEventListener("resize", () => { sizeLevelCanvas(); drawLevels(); });
+
+  await listen("levels", (event) => {
+    const { user, agent } = event.payload || {};
+    userHistory.push(typeof user === "number" ? user : 0);
+    userHistory.shift();
+    agentHistory.push(typeof agent === "number" ? agent : 0);
+    agentHistory.shift();
+    drawLevels();
+  });
+
   // The VRM face finished loading (avatar.js dispatches this).
   window.addEventListener("avatar-ready", () => {
     avatarReady = true;
@@ -167,7 +295,7 @@ async function init() {
         names = obj.header.blendShapes;
         console.log("[prosopon] blendshape header:", names.length, "shapes");
       } else if (obj.v && Array.isArray(obj.v) && names) {
-        frames.push({ t: typeof obj.t === "number" ? obj.t : 0, v: obj.v });
+        frames.push({ t: typeof obj.t === "number" ? obj.t : 0, values: obj.v });
       }
     }
     if (names && frames.length > 0) {

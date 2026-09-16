@@ -28759,6 +28759,13 @@ var blendShapeNames = null;
 var frameQueue = [];
 var playbackStart = 0;
 var playing = false;
+var BLINK_DURATION = 0.28;
+var blinkTimer = 2;
+var blinkPhase = 0;
+var blinking = false;
+function nextBlinkDelay() {
+  return 3 + Math.random() * 2;
+}
 async function init(canvasEl) {
   canvas = canvasEl;
   renderer = new WebGLRenderer({ canvas, antialias: true, alpha: true });
@@ -28768,11 +28775,11 @@ async function init(canvasEl) {
   camera = new PerspectiveCamera(30, 1, 0.01, 20);
   camera.position.set(0, 1.5, 0.55);
   camera.lookAt(0, 1.5, 0);
-  scene.add(new AmbientLight(16777215, 0.9));
-  const key = new DirectionalLight(16777215, 1.4);
+  scene.add(new AmbientLight(16777215, 0.45));
+  const key = new DirectionalLight(16777215, 0.8);
   key.position.set(1, 2, 1.5);
   scene.add(key);
-  const rim = new DirectionalLight(16777215, 0.5);
+  const rim = new DirectionalLight(16777215, 0.3);
   rim.position.set(-1, 1, -1);
   scene.add(rim);
   clock = new Clock();
@@ -28798,6 +28805,7 @@ async function init(canvasEl) {
     for (const name of Object.keys(vrm.expressionManager.expressionMap)) {
       validNames.add(name);
     }
+    colorizeAvatar();
     frameHead();
     ready = true;
     console.log("[avatar] VRM loaded,", validNames.size, "expressions");
@@ -28807,6 +28815,51 @@ async function init(canvasEl) {
     console.error("[avatar] VRM load failed:", e);
   }
   animate();
+}
+function colorizeAvatar() {
+  if (!vrm) return;
+  const logged = /* @__PURE__ */ new Set();
+  const rules = [
+    // order matters: first match wins
+    { match: ["mouth"], color: 13840175 },
+    // FaceMouth -> red lips
+    { match: ["iris"], color: 3829413 },
+    // EyeIris -> blue
+    { match: ["hair"], color: 7031343 },
+    // Hair, HairBack -> warm brown
+    { match: ["tops"], color: 14257312 },
+    // Tops_01_CLOTH -> dusty rose dress
+    { match: ["bottoms"], color: 13204112 },
+    // Bottoms_01_CLOTH -> deeper rose
+    { match: ["shoes"], color: 4868698 },
+    // Shoes_01_CLOTH -> dark slate
+    { match: ["body"], color: 16107688 },
+    // Body_00_SKIN -> skin
+    { match: ["skin"], color: 16107688 }
+    // Face_00_SKIN -> skin
+  ];
+  vrm.scene.traverse((obj) => {
+    if (!obj.isMesh) return;
+    const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+    for (const mat of mats) {
+      if (!mat) continue;
+      const name = (mat.name || "").toLowerCase();
+      if (name.includes("outline")) continue;
+      if (!logged.has(name)) {
+        logged.add(name);
+        console.log("[avatar] material:", mat.name || "(unnamed)");
+      }
+      for (const rule of rules) {
+        if (rule.match.some((m) => name.includes(m))) {
+          if (mat.color) {
+            mat.color.setHex(rule.color);
+            mat.needsUpdate = true;
+          }
+          break;
+        }
+      }
+    }
+  });
 }
 function frameHead() {
   const box = new Box3().setFromObject(vrm.scene);
@@ -28829,6 +28882,117 @@ function frameHead() {
     dist.toFixed(2)
   );
 }
+var idleTime = 0;
+var armAxisLogged = false;
+var fingerDebugLogged = false;
+var ARM_DOWN = 1.4;
+var RESTING_SMILE = 0.22;
+var SHOULDER_SWAY = 0.06;
+var WRIST_SWAY = 0.12;
+var FINGER_CURL = 0.15;
+function updateIdleMotion(delta) {
+  if (!vrm || !vrm.humanoid) return;
+  idleTime += delta;
+  const t = idleTime;
+  const chest = vrm.humanoid.getNormalizedBoneNode("chest");
+  if (chest) {
+    chest.rotation.x = Math.sin(t * 1.6) * 0.03;
+  }
+  const head = vrm.humanoid.getNormalizedBoneNode("head");
+  if (head) {
+    head.rotation.y = Math.sin(t * 0.5) * 0.06;
+    head.rotation.z = Math.sin(t * 0.31 + 1.3) * 0.03;
+    head.rotation.x = Math.sin(t * 0.23 + 0.8) * 0.04;
+  }
+  try {
+    const rightUpperArm = vrm.humanoid.getNormalizedBoneNode("rightUpperArm");
+    if (rightUpperArm) {
+      rightUpperArm.rotation.z = -ARM_DOWN + Math.sin(t * 0.4) * 0.04;
+    }
+    const leftUpperArm = vrm.humanoid.getNormalizedBoneNode("leftUpperArm");
+    if (leftUpperArm) {
+      leftUpperArm.rotation.z = ARM_DOWN + Math.sin(t * 0.4 + 1.7) * 0.04;
+    }
+  } catch (e) {
+    console.error("[avatar] arm motion failed:", e);
+  }
+  try {
+    const rightShoulder = vrm.humanoid.getNormalizedBoneNode("rightShoulder");
+    const leftShoulder = vrm.humanoid.getNormalizedBoneNode("leftShoulder");
+    if (rightShoulder) {
+      rightShoulder.rotation.x = Math.sin(t * 0.7) * SHOULDER_SWAY;
+      rightShoulder.rotation.z = Math.sin(t * 0.5 + 1) * SHOULDER_SWAY * 0.7;
+    }
+    if (leftShoulder) {
+      leftShoulder.rotation.x = Math.sin(t * 0.7 + 1.7) * SHOULDER_SWAY;
+      leftShoulder.rotation.z = Math.sin(t * 0.5 + 2.4) * SHOULDER_SWAY * 0.7;
+    }
+  } catch (e) {
+    console.error("[avatar] shoulder motion failed:", e);
+  }
+  try {
+    const rightHand = vrm.humanoid.getNormalizedBoneNode("rightHand");
+    const leftHand = vrm.humanoid.getNormalizedBoneNode("leftHand");
+    if (rightHand) {
+      rightHand.rotation.z = Math.sin(t * 0.6 + 0.5) * WRIST_SWAY;
+    }
+    if (leftHand) {
+      leftHand.rotation.z = Math.sin(t * 0.6 + 2.1) * WRIST_SWAY;
+    }
+  } catch (e) {
+    console.error("[avatar] hand motion failed:", e);
+  }
+  try {
+    const fingerBones = [
+      "leftThumbProximal",
+      "leftThumbIntermediate",
+      "leftIndexProximal",
+      "leftIndexIntermediate",
+      "leftMiddleProximal",
+      "leftMiddleIntermediate",
+      "leftRingProximal",
+      "leftRingIntermediate",
+      "leftLittleProximal",
+      "leftLittleIntermediate",
+      "rightThumbProximal",
+      "rightThumbIntermediate",
+      "rightIndexProximal",
+      "rightIndexIntermediate",
+      "rightMiddleProximal",
+      "rightMiddleIntermediate",
+      "rightRingProximal",
+      "rightRingIntermediate",
+      "rightLittleProximal",
+      "rightLittleIntermediate"
+    ];
+    const curl = Math.sin(t * 0.8) * FINGER_CURL;
+    let found = 0;
+    for (const name of fingerBones) {
+      const bone = vrm.humanoid.getNormalizedBoneNode(name);
+      if (bone) {
+        bone.rotation.x = curl;
+        found += 1;
+      }
+    }
+    if (!fingerDebugLogged) {
+      fingerDebugLogged = true;
+      console.log("[avatar] finger bones found:", found, "of", fingerBones.length);
+    }
+  } catch (e) {
+    console.error("[avatar] finger motion failed:", e);
+  }
+  if (!armAxisLogged) {
+    armAxisLogged = true;
+    const r = vrm.humanoid.getNormalizedBoneNode("rightUpperArm");
+    const l = vrm.humanoid.getNormalizedBoneNode("leftUpperArm");
+    if (r && l) {
+      console.log("[avatar] rightUpperArm world pos:", r.getWorldPosition(new Vector3()).toArray());
+      console.log("[avatar] leftUpperArm  world pos:", l.getWorldPosition(new Vector3()).toArray());
+      console.log("[avatar] rightUpperArm rest rot:", r.rotation.toArray());
+      console.log("[avatar] leftUpperArm  rest rot:", l.rotation.toArray());
+    }
+  }
+}
 function animate() {
   requestAnimationFrame(animate);
   if (!vrm) return;
@@ -28847,8 +29011,53 @@ function animate() {
       reset();
     }
   }
+  updateBlink(delta);
+  updateRestingSmile();
+  updateIdleMotion(delta);
   vrm.update(delta);
   renderer.render(scene, camera);
+}
+function updateRestingSmile() {
+  if (!vrm || !ready) return;
+  for (const name of ["MouthSmileLeft", "MouthSmileRight"]) {
+    if (!validNames.has(name)) continue;
+    const cur = vrm.expressionManager.getValue(name) || 0;
+    if (cur < RESTING_SMILE) {
+      vrm.expressionManager.setValue(name, RESTING_SMILE);
+    }
+  }
+}
+function updateBlink(delta) {
+  if (!ready) return;
+  if (blinking) {
+    blinkPhase += delta / BLINK_DURATION;
+    if (blinkPhase >= 1) {
+      blinking = false;
+      blinkPhase = 0;
+      blinkTimer = nextBlinkDelay();
+      setBlink(0);
+    } else {
+      const w = blinkPhase < 0.5 ? blinkPhase * 2 : (1 - blinkPhase) * 2;
+      setBlink(w);
+    }
+  } else {
+    blinkTimer -= delta;
+    if (blinkTimer <= 0) {
+      blinking = true;
+      blinkPhase = 0;
+    }
+  }
+}
+function setBlink(w) {
+  if (!vrm) return;
+  if (validNames.has("EyeBlinkLeft")) {
+    vrm.expressionManager.setValue("EyeBlinkLeft", w);
+    appliedNames.add("EyeBlinkLeft");
+  }
+  if (validNames.has("EyeBlinkRight")) {
+    vrm.expressionManager.setValue("EyeBlinkRight", w);
+    appliedNames.add("EyeBlinkRight");
+  }
 }
 function applyValues(values) {
   if (!vrm || !ready || !blendShapeNames) return;

@@ -16,8 +16,68 @@
 
 use crate::aec::ReferenceBuffer;
 use std::io::Cursor;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use rodio::Source;
+
+/// Wraps a `Source` and reports the RMS level of each ~100 ms window to a
+/// shared slot as samples are consumed (i.e., in real time during playback).
+/// Drives the agent side of the level meter.
+struct LevelSource<S> {
+    inner: S,
+    level: Arc<Mutex<f32>>,
+    window: Vec<f32>,
+    window_len: usize,
+}
+
+impl<S> LevelSource<S> {
+    fn new(inner: S, level: Arc<Mutex<f32>>, sample_rate: u32) -> Self {
+        let window_len = (sample_rate as usize + 9) / 10; // 100 ms
+        Self {
+            inner,
+            level,
+            window: Vec::with_capacity(window_len),
+            window_len,
+        }
+    }
+}
+
+impl<S> Iterator for LevelSource<S>
+where
+    S: Iterator<Item = f32>,
+{
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        let sample = self.inner.next()?;
+        self.window.push(sample);
+        if self.window.len() >= self.window_len {
+            let rms = (self.window.iter().map(|s| s * s).sum::<f32>()
+                / self.window.len() as f32)
+                .sqrt();
+            *self.level.lock().unwrap() = rms;
+            self.window.clear();
+        }
+        Some(sample)
+    }
+}
+
+impl<S> Source for LevelSource<S>
+where
+    S: Source<Item = f32>,
+{
+    fn current_frame_len(&self) -> Option<usize> {
+        self.inner.current_frame_len()
+    }
+    fn channels(&self) -> u16 {
+        self.inner.channels()
+    }
+    fn sample_rate(&self) -> u32 {
+        self.inner.sample_rate()
+    }
+    fn total_duration(&self) -> Option<std::time::Duration> {
+        self.inner.total_duration()
+    }
+}
 
 /// An in-flight playback. Holds the output stream and sink alive; `stop()`
 /// interrupts it, `is_finished()` reports completion.
@@ -48,6 +108,16 @@ impl Playback {
         bytes: &[u8],
         reference: Arc<ReferenceBuffer>,
     ) -> Result<Self, String> {
+        Self::start_with_reference_and_level(bytes, reference, Arc::new(Mutex::new(0.0)))
+    }
+
+    /// Like [`Playback::start_with_reference`], but also reports the live RMS
+    /// level to `level` (a shared slot) as the audio plays, for the level meter.
+    pub fn start_with_reference_and_level(
+        bytes: &[u8],
+        reference: Arc<ReferenceBuffer>,
+        level: Arc<Mutex<f32>>,
+    ) -> Result<Self, String> {
         // Decode once to raw f32 samples.
         let cursor = Cursor::new(bytes.to_vec());
         let source = rodio::Decoder::new(cursor).map_err(|e| format!("decode WAV: {e}"))?;
@@ -60,8 +130,9 @@ impl Playback {
         let mono_16k = resample_mono(&mono, sample_rate, 16_000);
         reference.push(&mono_16k);
 
-        // Playback: native rate and channel count.
+        // Playback: native rate and channel count, wrapped to report level.
         let source = rodio::buffer::SamplesBuffer::new(channels, sample_rate, samples);
+        let source = LevelSource::new(source, level, sample_rate);
         let (_stream, handle) = rodio::OutputStream::try_default()
             .map_err(|e| format!("open output stream: {e}"))?;
         let sink = rodio::Sink::try_new(&handle).map_err(|e| format!("sink: {e}"))?;
