@@ -1,4 +1,4 @@
-// Prosopon frontend — the robot avatar, driven by the Rust state machine via Tauri events.
+// Prosopon frontend — the avatar, driven by the Rust state machine via Tauri events.
 // Uses the global `window.__TAURI__` (withGlobalTauri: true), so no build step.
 
 const { invoke } = window.__TAURI__.core;
@@ -14,8 +14,15 @@ const logsPanel = document.getElementById("logs");
 const logsBody = document.getElementById("logs-body");
 const logsBtn = document.getElementById("btn-logs");
 const clearLogsBtn = document.getElementById("btn-clear-logs");
+const avatarCanvas = document.getElementById("avatar-canvas");
 
 const MAX_LOG_LINES = 500;
+
+// The VRM face (avatar.js) is ready once the model has loaded.
+let avatarReady = false;
+
+// The ARKit blendshape names, from the track header (persists across events).
+let blendShapeNames = null;
 
 const STATE_COLORS = {
   disconnected: "#4a4a55",
@@ -34,12 +41,21 @@ function applyState(state) {
   orb.classList.toggle("is-muted", state.muted);
   muteBtn.classList.toggle("muted", state.muted);
   updateConnectButton(state);
+  updateAvatarVisibility();
 }
 
 function updateConnectButton(state) {
   const connected = state.state !== "disconnected";
   connectBtn.textContent = connected ? "Disconnect" : "Connect";
   connectBtn.classList.toggle("connected", connected);
+}
+
+// Show the VRM face when connected and loaded; otherwise show the robot.
+function updateAvatarVisibility() {
+  const connected = orb.dataset.state !== "disconnected";
+  const showAvatar = connected && avatarReady;
+  avatarCanvas.classList.toggle("visible", showAvatar);
+  orb.classList.toggle("hidden", showAvatar);
 }
 
 function addLine(speaker, text) {
@@ -123,14 +139,39 @@ async function init() {
     applyState(event.payload);
   });
 
-  // Blendshape track (avatar animation). The payload is NDJSON: one frame
-  // per line, each `{timecode_ms, weights:{...}}`. For now we count the
-  // frames and log them; the three.js VRM face consumes this in a later phase.
+  // The VRM face finished loading (avatar.js dispatches this).
+  window.addEventListener("avatar-ready", () => {
+    avatarReady = true;
+    console.log("[prosopon] avatar ready");
+    updateAvatarVisibility();
+  });
+
+  // Blendshape track (avatar animation). The payload is NDJSON:
+  //   line 1: {"header":{"blendShapes":["EyeBlinkLeft", ...]}}
+  //   then:   {"t": <time_code>, "v": [<weights...>]}
+  // We parse the header for names, then feed each frame's weights to the VRM.
   await listen("blendshapes", (event) => {
     const track = event.payload || "";
     const lines = track.split("\n").filter((l) => l.trim().length > 0);
-    console.log("[prosopon] blendshapes track:", lines.length, "frames");
-    addLog({ level: "info", source: "avatar", message: lines.length + " blendshape frames" });
+    let frameCount = 0;
+    for (const line of lines) {
+      let obj;
+      try {
+        obj = JSON.parse(line);
+      } catch (e) {
+        continue;
+      }
+      if (obj.header && Array.isArray(obj.header.blendShapes)) {
+        blendShapeNames = obj.header.blendShapes;
+        console.log("[prosopon] blendshape header:", blendShapeNames.length, "shapes");
+      } else if (obj.v && Array.isArray(obj.v) && blendShapeNames) {
+        window.avatar?.applyFrame(blendShapeNames, obj.v);
+        frameCount++;
+      }
+    }
+    if (frameCount > 0) {
+      console.log("[prosopon] blendshapes:", frameCount, "frames");
+    }
   });
 
   // Connect / disconnect toggle.

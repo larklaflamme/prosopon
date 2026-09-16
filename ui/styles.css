@@ -448,3 +448,24 @@ body {
 
 .logs-toggle:hover { background: #262a33; color: var(--text); }
 .logs-toggle.active { color: #5b8def; }
+
+/* ---- VRM avatar canvas (three.js face) ---- */
+.orb-stage {
+  position: relative;
+}
+
+.avatar-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: none;
+}
+
+.avatar-canvas.visible {
+  display: block;
+}
+
+.orb.hidden {
+  display: none;
+}
