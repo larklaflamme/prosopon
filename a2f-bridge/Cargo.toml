@@ -1,0 +1,19 @@
+[package]
+name = "a2f-bridge"
+version = "0.1.0"
+edition = "2021"
+description = "Prosopon Audio2Face-3D bridge — streams TTS audio to the A2F NIM and forwards ARKit blendshapes"
+authors = ["Skye Laflamme <skye@ravennest.science>"]
+
+[dependencies]
+tonic = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio-stream = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hound = "3"
+
+[build-dependencies]
+tonic-build = "0.12"

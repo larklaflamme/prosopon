@@ -1,0 +1,16 @@
+// Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+syntax = "proto3";
+
+package nvidia_ace.services.a2f_authoring.v1;
+
+import "nvidia_ace.a2f_authoring.v1.proto";
+
+// This API allows to get unique frames from Audio2Face inference (also known as authoring)
+service A2FAuthoringService {
+    // Upload the audio clip to the AuthoringService to be processed.
+    rpc UploadAudioClip(nvidia_ace.a2f_authoring.v1.AudioClip) returns (nvidia_ace.a2f_authoring.v1.AudioClipHandle) {};
+
+    // Request a single animation frame at the specified timecode.
+    rpc GetAvatarFacePose(nvidia_ace.a2f_authoring.v1.FacePoseRequest) returns (nvidia_ace.a2f_authoring.v1.BlendShapeData) {};
+}

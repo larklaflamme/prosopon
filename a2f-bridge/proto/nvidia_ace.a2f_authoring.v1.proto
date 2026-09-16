@@ -1,0 +1,54 @@
+// Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+syntax = "proto3";
+
+package nvidia_ace.a2f_authoring.v1;
+
+import "nvidia_ace.audio.v1.proto";
+import "nvidia_ace.a2f.v1.proto";
+
+message AudioClip {
+    // Audio header the appropriate metadata such as sample rate, etc
+    nvidia_ace.audio.v1.AudioHeader audio_header = 1;
+    // Content of the audio file
+    bytes content = 2;
+}
+
+message AudioClipHandle {
+    // SHA-256 hash of the audio clip.
+    string audio_clip_id = 1;
+
+    // Names of the blendshapes that will be sent back to the client.
+    repeated string blendshape_names = 2;
+}
+
+message FacePoseRequest {
+    string audio_hash = 1;
+
+    map<string, float> preferred_emotions = 2;
+
+    float time_stamp = 3;
+
+    // Parameters for updating the facial characteristics of an avatar
+    // See the documentation for more information
+    nvidia_ace.a2f.v1.FaceParameters face_params = 4;
+  
+    // Parameters relative to the emotion blending and processing
+    // before using it to generate blendshapes
+    // See the documentation for more information
+    nvidia_ace.a2f.v1.EmotionPostProcessingParameters emotion_pp_params = 5;
+  
+    // Multipliers and offsets to apply to the generated blendshapes values
+    nvidia_ace.a2f.v1.BlendShapeParameters blendshape_params = 6;
+}
+
+message BlendShapeData {
+    // Blendshapes.
+    repeated float blendshapes = 1;
+
+    // Echo the time_code for the frame.
+    float time_code = 2;
+
+    // Emotion output from A2E after post-processing (Applied emotions).
+    map<string, float> emotions = 3;
+}
