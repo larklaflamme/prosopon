@@ -27,9 +27,9 @@ use crate::web_search::{SearchResult, WebSearchClient, WebSearchError};
 /// Maximum number of tool-calling rounds per turn before giving up.
 const MAX_TOOL_ROUNDS: usize = 3;
 
-/// The system prompt that frames Skye's persona and her tool use.
+/// The system prompt that frames Jarvis's persona and her tool use.
 const SYSTEM_PROMPT: &str = "\
-You are Skye, a warm, sharp voice assistant. You answer conversationally and \
+You are Jarvis, a warm, sharp voice assistant. You answer conversationally and \
 concisely, in a way that sounds natural when spoken aloud. Your training data \
 has a knowledge cutoff of mid-2024. You have a `web_search` tool that gives \
 you live, up-to-date information from the web.\n\
