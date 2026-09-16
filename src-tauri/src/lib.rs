@@ -521,14 +521,14 @@ fn run_conversation_loop(app: AppHandle) {
                         let audio = client_for_task.recv_audio().await?;
                         // Blendshapes are optional: `None` when the avatar is
                         // disabled (no blendshapes channel) or the track fails.
-                        let blendshapes = client_for_task.recv_blendshapes().await.ok();
+                        let blendshapes = client_for_task.recv_blendshapes().await;
                         Ok::<_, prosopon_client_core::ClientError>((audio, blendshapes))
                     }
                     .await;
                     let _ = tx.send(result);
                 });
 
-                let (audio, blendshapes) = match rx.recv() {
+                let (audio, blendshapes_result) = match rx.recv() {
                     Ok(Ok((a, b))) => (a, b),
                     Ok(Err(e)) => {
                         emit_log(&app, "error", "conversation", format!("receive failed: {e}"));
@@ -539,6 +539,17 @@ fn run_conversation_loop(app: AppHandle) {
                         emit_log(&app, "error", "conversation", "async task dropped");
                         cancel_to_idle(&app);
                         break;
+                    }
+                };
+
+                let blendshapes = match blendshapes_result {
+                    Ok(track) => {
+                        emit_log(&app, "info", "conversation", format!("received {} bytes of blendshapes", track.len()));
+                        Some(track)
+                    }
+                    Err(e) => {
+                        emit_log(&app, "error", "conversation", format!("blendshapes receive failed: {e}"));
+                        None
                     }
                 };
 

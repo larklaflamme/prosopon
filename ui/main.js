@@ -152,6 +152,7 @@ async function init() {
   // We parse the header for names, then feed each frame's weights to the VRM.
   await listen("blendshapes", (event) => {
     const track = event.payload || "";
+    console.log("[prosopon] blendshapes event, payload length:", track.length);
     const lines = track.split("\n").filter((l) => l.trim().length > 0);
     let frameCount = 0;
     for (const line of lines) {
