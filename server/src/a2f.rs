@@ -46,7 +46,14 @@ impl A2fClient {
             return None;
         }
 
-        let result = self.run_bridge(&tmp).await;
+        // Scale the bridge timeout to the audio length. The bridge streams
+        // audio to the NIM and reads back animation frames at ~3.6x real-time,
+        // so a fixed 3s timeout is too tight for longer TTS responses.
+        let duration = wav_duration_secs(wav);
+        let timeout = Duration::from_secs_f64(
+            (duration / 2.0 + 3.0).max(self.timeout.as_secs_f64()).min(30.0),
+        );
+        let result = self.run_bridge(&tmp, timeout).await;
 
         let _ = tokio::fs::remove_file(&tmp).await;
         result
@@ -54,7 +61,7 @@ impl A2fClient {
 
     /// Spawn `a2f-bridge <wav> <endpoint>` and capture its stdout, bounded by
     /// `self.timeout`.
-    async fn run_bridge(&self, wav_path: &Path) -> Option<String> {
+    async fn run_bridge(&self, wav_path: &Path, timeout: Duration) -> Option<String> {
         let mut child = Command::new(&self.bridge_path)
             .arg(wav_path)
             .arg(&self.endpoint)
@@ -68,7 +75,7 @@ impl A2fClient {
         let mut buf = String::new();
         let read_fut = stdout.read_to_string(&mut buf);
 
-        match tokio::time::timeout(self.timeout, read_fut).await {
+        match tokio::time::timeout(timeout, read_fut).await {
             Ok(Ok(_)) => {
                 // Reap the child (stdout EOF means it already exited).
                 let _ = child.wait().await;
@@ -90,4 +97,30 @@ impl A2fClient {
             }
         }
     }
+}
+
+/// Estimate the duration (seconds) of a PCM WAV from its header.
+fn wav_duration_secs(wav: &[u8]) -> f64 {
+    if wav.len() < 44 {
+        return 0.0;
+    }
+    let byte_rate = u32::from_le_bytes([wav[28], wav[29], wav[30], wav[31]]) as f64;
+    if byte_rate <= 0.0 {
+        return 0.0;
+    }
+    // Find the "data" chunk size (skip any metadata chunks like ISFT).
+    let mut data_size = 0u32;
+    let mut i = 12usize;
+    while i + 8 <= wav.len() {
+        if &wav[i..i + 4] == b"data" {
+            data_size = u32::from_le_bytes([wav[i + 4], wav[i + 5], wav[i + 6], wav[i + 7]]);
+            break;
+        }
+        let sz = u32::from_le_bytes([wav[i + 4], wav[i + 5], wav[i + 6], wav[i + 7]]) as usize;
+        i += 8 + sz + (sz & 1);
+    }
+    if data_size == 0 {
+        data_size = (wav.len() - 44) as u32;
+    }
+    data_size as f64 / byte_rate
 }
