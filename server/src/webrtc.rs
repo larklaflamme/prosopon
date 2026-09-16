@@ -74,24 +74,6 @@ async fn send_blendshapes(channel: &Arc<dyn DataChannel>, track: &str) -> webrtc
     Ok(())
 }
 
-/// Wait for a data channel to open, bounded by `timeout`. Returns `true` if it
-/// opened, `false` on close/error/timeout.
-async fn wait_for_open(channel: &Arc<dyn DataChannel>, timeout: Duration) -> bool {
-    let result = tokio::time::timeout(timeout, async {
-        loop {
-            match channel.poll().await {
-                Some(DataChannelEvent::OnOpen) => return true,
-                Some(DataChannelEvent::OnClose) | Some(DataChannelEvent::OnError) | None => {
-                    return false;
-                }
-                Some(_) => {}
-            }
-        }
-    })
-    .await;
-    result.unwrap_or(false)
-}
-
 /// Shared ICE state: the candidates gathered so far, plus a flag set when
 /// gathering completes.
 struct IceState {
@@ -117,6 +99,9 @@ struct Handler {
     /// Populated after the peer connection is built; lets the data-channel
     /// handler close the pc when the client disconnects.
     pc: Arc<Mutex<Option<Arc<dyn PeerConnection>>>>,
+    /// The client-initiated blendshapes channel, captured when it arrives so
+    /// the voice loop can send the avatar track over it.
+    blendshapes_channel: Arc<Mutex<Option<Arc<dyn DataChannel>>>>,
 }
 
 #[async_trait::async_trait]
@@ -138,32 +123,20 @@ impl PeerConnectionEventHandler for Handler {
     }
 
     async fn on_data_channel(&self, data_channel: Arc<dyn DataChannel>) {
+        // Route by label. The client initiates BOTH channels in its offer:
+        // "voice" carries the conversation, "blendshapes" carries the avatar
+        // track. (The server must not create a channel after answering — that
+        // would require renegotiation, which we don't do.)
+        let label = data_channel.label().await.unwrap_or_default();
+        eprintln!("[prosopon] on_data_channel: label={:?}", label);
+        if label == "blendshapes" {
+            *self.blendshapes_channel.lock().unwrap() = Some(data_channel);
+            return;
+        }
+
         let pipeline = self.pipeline.clone();
         let pc = self.pc.clone();
-
-        // Create the server-initiated blendshapes channel (the second data
-        // channel on the same peer connection — no new network surface, no new
-        // port). If it fails to open, `blendshapes_channel` is `None` and the
-        // avatar degrades to audio-only.
-        let blendshapes_channel = {
-            // Clone the Arc out of the mutex and drop the guard before the
-            // `.await` below (a MutexGuard is not Send).
-            let pc_clone = pc.lock().unwrap().clone();
-            match pc_clone {
-                Some(pc) => match pc.create_data_channel("blendshapes", None).await {
-                    Ok(ch) if wait_for_open(&ch, Duration::from_secs(10)).await => Some(ch),
-                    Ok(_) => {
-                        eprintln!("blendshapes channel failed to open; avatar disabled");
-                        None
-                    }
-                    Err(e) => {
-                        eprintln!("failed to create blendshapes channel: {e}");
-                        None
-                    }
-                },
-                None => None,
-            }
-        };
+        let blendshapes_channel = self.blendshapes_channel.clone();
 
         tokio::spawn(async move {
             // Per-session conversational history. Each data channel is one
@@ -181,10 +154,22 @@ impl PeerConnectionEventHandler for Handler {
                                 if let Err(e) = send_audio(&data_channel, &out.audio).await {
                                     eprintln!("failed to send audio over data channel: {e}");
                                 }
-                                if let (Some(ch), Some(bs)) = (&blendshapes_channel, &out.blendshapes) {
-                                    if let Err(e) = send_blendshapes(ch, bs).await {
+                                // Always send a blendshapes header (empty track
+                                // when the avatar is disabled) so the client's
+                                // recv_blendshapes never blocks waiting for a
+                                // header that will never arrive.
+                                let bs = out.blendshapes.as_deref().unwrap_or("");
+                                // Clone the channel out of the mutex and drop
+                                // the guard before the `.await` below (a
+                                // MutexGuard is not Send).
+                                let ch = blendshapes_channel.lock().unwrap().clone();
+                                if let Some(ch) = ch {
+                                    eprintln!("[prosopon] sending blendshapes track ({} bytes)", bs.len());
+                                    if let Err(e) = send_blendshapes(&ch, bs).await {
                                         eprintln!("failed to send blendshapes over data channel: {e}");
                                     }
+                                } else {
+                                    eprintln!("[prosopon] blendshapes channel not captured; skipping track");
                                 }
                             }
                             Err(e) => {
@@ -205,6 +190,7 @@ impl PeerConnectionEventHandler for Handler {
             }
         });
     }
+
 }
 
 /// The WebRTC server: a single peer connection that answers one offer and
@@ -231,6 +217,7 @@ impl WebRtcServer {
             ice: ice.clone(),
             connection_state: connection_state.clone(),
             pc: pc_handle.clone(),
+            blendshapes_channel: Arc::new(Mutex::new(None)),
         });
         let ice_servers = config
             .stun_servers
