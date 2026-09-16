@@ -23,6 +23,15 @@ const validNames = new Set();   // expression names present in the VRM
 const appliedNames = new Set(); // names we've driven, for reset
 const warnedNames = new Set();  // names that didn't match, warned once
 
+// Playback state. The blendshape track arrives as a single batch of frames,
+// each with a time_code (seconds). We buffer them and play them back over
+// time in the render loop, so the face animates instead of freezing on the
+// final frame.
+let blendShapeNames = null;     // ARKit names from the track header
+let frameQueue = [];            // [{t, values}] pending playback
+let playbackStart = 0;          // performance.now() ms when playback began
+let playing = false;
+
 async function init(canvasEl) {
   canvas = canvasEl;
 
@@ -119,15 +128,35 @@ function animate() {
   requestAnimationFrame(animate);
   if (!vrm) return;
   const delta = clock.getDelta();
+
+  // Play back the buffered track over time. Each frame carries a time_code
+  // (seconds); we show the pose whose time_code is closest to the elapsed
+  // playback time, so the face animates in sync with the audio instead of
+  // snapping to the final frame.
+  if (playing && frameQueue.length > 0) {
+    const elapsed = (performance.now() - playbackStart) / 1000;
+    let current = null;
+    for (const f of frameQueue) {
+      if (f.t <= elapsed) current = f;
+      else break;
+    }
+    if (current) applyValues(current.values);
+    if (elapsed >= frameQueue[frameQueue.length - 1].t) {
+      playing = false;
+      frameQueue = [];
+      reset();
+    }
+  }
+
   vrm.update(delta);
   renderer.render(scene, camera);
 }
 
-function applyFrame(names, values) {
-  if (!vrm || !ready) return;
-  const n = Math.min(names.length, values.length);
+function applyValues(values) {
+  if (!vrm || !ready || !blendShapeNames) return;
+  const n = Math.min(blendShapeNames.length, values.length);
   for (let i = 0; i < n; i++) {
-    const name = names[i];
+    const name = blendShapeNames[i];
     const w = Math.max(0, Math.min(1, values[i]));
     if (validNames.has(name)) {
       vrm.expressionManager.setValue(name, w);
@@ -137,6 +166,15 @@ function applyFrame(names, values) {
       console.warn('[avatar] no expression for blendshape:', name);
     }
   }
+}
+
+// Buffer a full track (names + frames) and start playback.
+function enqueueFrames(names, frames) {
+  if (!frames || frames.length === 0) return;
+  blendShapeNames = names;
+  frameQueue = frames;
+  playbackStart = performance.now();
+  playing = true;
 }
 
 function reset() {
@@ -149,7 +187,7 @@ function reset() {
 
 window.avatar = {
   init,
-  applyFrame,
+  enqueueFrames,
   reset,
   get ready() { return ready; },
   get error() { return loadError; },

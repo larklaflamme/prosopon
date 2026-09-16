@@ -28755,6 +28755,10 @@ var loadError = null;
 var validNames = /* @__PURE__ */ new Set();
 var appliedNames = /* @__PURE__ */ new Set();
 var warnedNames = /* @__PURE__ */ new Set();
+var blendShapeNames = null;
+var frameQueue = [];
+var playbackStart = 0;
+var playing = false;
 async function init(canvasEl) {
   canvas = canvasEl;
   renderer = new WebGLRenderer({ canvas, antialias: true, alpha: true });
@@ -28829,14 +28833,28 @@ function animate() {
   requestAnimationFrame(animate);
   if (!vrm) return;
   const delta = clock.getDelta();
+  if (playing && frameQueue.length > 0) {
+    const elapsed = (performance.now() - playbackStart) / 1e3;
+    let current = null;
+    for (const f of frameQueue) {
+      if (f.t <= elapsed) current = f;
+      else break;
+    }
+    if (current) applyValues(current.values);
+    if (elapsed >= frameQueue[frameQueue.length - 1].t) {
+      playing = false;
+      frameQueue = [];
+      reset();
+    }
+  }
   vrm.update(delta);
   renderer.render(scene, camera);
 }
-function applyFrame(names, values) {
-  if (!vrm || !ready) return;
-  const n = Math.min(names.length, values.length);
+function applyValues(values) {
+  if (!vrm || !ready || !blendShapeNames) return;
+  const n = Math.min(blendShapeNames.length, values.length);
   for (let i = 0; i < n; i++) {
-    const name = names[i];
+    const name = blendShapeNames[i];
     const w = Math.max(0, Math.min(1, values[i]));
     if (validNames.has(name)) {
       vrm.expressionManager.setValue(name, w);
@@ -28847,6 +28865,13 @@ function applyFrame(names, values) {
     }
   }
 }
+function enqueueFrames(names, frames) {
+  if (!frames || frames.length === 0) return;
+  blendShapeNames = names;
+  frameQueue = frames;
+  playbackStart = performance.now();
+  playing = true;
+}
 function reset() {
   if (!vrm) return;
   for (const name of appliedNames) {
@@ -28856,7 +28881,7 @@ function reset() {
 }
 window.avatar = {
   init,
-  applyFrame,
+  enqueueFrames,
   reset,
   get ready() {
     return ready;

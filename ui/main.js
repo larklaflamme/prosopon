@@ -154,7 +154,8 @@ async function init() {
     const track = event.payload || "";
     console.log("[prosopon] blendshapes event, payload length:", track.length);
     const lines = track.split("\n").filter((l) => l.trim().length > 0);
-    let frameCount = 0;
+    let names = null;
+    const frames = [];
     for (const line of lines) {
       let obj;
       try {
@@ -163,15 +164,15 @@ async function init() {
         continue;
       }
       if (obj.header && Array.isArray(obj.header.blendShapes)) {
-        blendShapeNames = obj.header.blendShapes;
-        console.log("[prosopon] blendshape header:", blendShapeNames.length, "shapes");
-      } else if (obj.v && Array.isArray(obj.v) && blendShapeNames) {
-        window.avatar?.applyFrame(blendShapeNames, obj.v);
-        frameCount++;
+        names = obj.header.blendShapes;
+        console.log("[prosopon] blendshape header:", names.length, "shapes");
+      } else if (obj.v && Array.isArray(obj.v) && names) {
+        frames.push({ t: typeof obj.t === "number" ? obj.t : 0, v: obj.v });
       }
     }
-    if (frameCount > 0) {
-      console.log("[prosopon] blendshapes:", frameCount, "frames");
+    if (names && frames.length > 0) {
+      window.avatar?.enqueueFrames(names, frames);
+      console.log("[prosopon] blendshapes:", frames.length, "frames queued");
     }
   });
 
