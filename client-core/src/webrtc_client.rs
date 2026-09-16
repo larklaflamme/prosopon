@@ -47,11 +47,9 @@ impl Default for IceState {
     }
 }
 
-/// Collects ICE candidates and captures the server-initiated blendshapes
-/// channel (the second data channel carrying the avatar track).
+/// Collects ICE candidates.
 struct Handler {
     ice: Arc<IceState>,
-    blendshapes_channel: Arc<Mutex<Option<Arc<dyn DataChannel>>>>,
 }
 
 #[async_trait::async_trait]
@@ -67,18 +65,13 @@ impl PeerConnectionEventHandler for Handler {
             *self.ice.gathering_complete.lock().unwrap() = true;
         }
     }
-
-    async fn on_data_channel(&self, data_channel: Arc<dyn DataChannel>) {
-        // The server creates a "blendshapes" channel for the avatar track.
-        *self.blendshapes_channel.lock().unwrap() = Some(data_channel);
-    }
 }
 
 /// The WebRTC client: a single peer connection that initiates the voice loop.
 pub struct WebRtcClient {
     pc: Arc<dyn PeerConnection>,
     data_channel: Arc<dyn DataChannel>,
-    blendshapes_channel: Arc<Mutex<Option<Arc<dyn DataChannel>>>>,
+    blendshapes_channel: Arc<dyn DataChannel>,
 }
 
 impl WebRtcClient {
@@ -87,10 +80,8 @@ impl WebRtcClient {
     /// `config.signaling.url`, and wait for the data channel to open.
     pub async fn connect(config: &ClientConfig) -> Result<Self, ClientError> {
         let ice = Arc::new(IceState::default());
-        let blendshapes_channel: Arc<Mutex<Option<Arc<dyn DataChannel>>>> = Arc::new(Mutex::new(None));
         let handler = Arc::new(Handler {
             ice: ice.clone(),
-            blendshapes_channel: blendshapes_channel.clone(),
         });
 
         let ice_servers = config
@@ -112,8 +103,13 @@ impl WebRtcClient {
             .build()
             .await?;
 
-        // Create the data channel (client-initiated, announced in-band).
+        // Create both data channels (client-initiated, announced in-band).
+        // The "voice" channel carries the conversation; the "blendshapes"
+        // channel carries the avatar track. Both must be created before the
+        // offer so they negotiate in the initial handshake (the server cannot
+        // create a channel after answering without renegotiation).
         let data_channel = pc.create_data_channel("voice", None).await?;
+        let blendshapes_channel = pc.create_data_channel("blendshapes", None).await?;
 
         // Create the offer and set it as the local description (starts
         // gathering).
@@ -139,8 +135,9 @@ impl WebRtcClient {
             pc.add_ice_candidate(candidate).await?;
         }
 
-        // Wait for the data channel to open before returning.
+        // Wait for both data channels to open before returning.
         wait_for_open(&data_channel).await?;
+        wait_for_open(&blendshapes_channel).await?;
 
         Ok(Self {
             pc: Arc::new(pc),
@@ -201,13 +198,8 @@ impl WebRtcClient {
     /// reassembled NDJSON track (UTF-8 bytes). Returns `ChannelNotOpen` if the
     /// server never created the blendshapes channel (avatar disabled).
     pub async fn recv_blendshapes(&self) -> Result<Vec<u8>, ClientError> {
-        let channel = self
-            .blendshapes_channel
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or(ClientError::ChannelNotOpen)?;
-        let total = self.read_blendshapes_header(&channel).await?;
+        let channel = &self.blendshapes_channel;
+        let total = self.read_blendshapes_header(channel).await?;
         let mut track = Vec::with_capacity(total);
         while track.len() < total {
             match channel.poll().await {

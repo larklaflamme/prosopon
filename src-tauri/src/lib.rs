@@ -510,7 +510,7 @@ fn run_conversation_loop(app: AppHandle) {
                     break;
                 };
 
-                // send_text + recv_audio are async; run them on the Tauri
+                // send_text + recv_audio + recv_blendshapes are async; run them on the Tauri
                 // runtime and hand the result back over a channel.
                 let (tx, rx) = std::sync::mpsc::channel();
                 let client_for_task = client.clone();
@@ -518,14 +518,23 @@ fn run_conversation_loop(app: AppHandle) {
                 tauri::async_runtime::spawn(async move {
                     let result = async {
                         client_for_task.send_text(&text_for_task).await?;
-                        client_for_task.recv_audio().await
+                        let audio = client_for_task.recv_audio().await?;
+                        // Blendshapes are optional: `None` when the avatar is
+                        // disabled (no blendshapes channel) or the track fails.
+                        let blendshapes = client_for_task.recv_blendshapes().await.ok();
+                        Ok::<_, prosopon_client_core::ClientError>((audio, blendshapes))
                     }
                     .await;
                     let _ = tx.send(result);
                 });
 
-                let audio = match rx.recv() {
-                    Ok(r) => r,
+                let (audio, blendshapes) = match rx.recv() {
+                    Ok(Ok((a, b))) => (a, b),
+                    Ok(Err(e)) => {
+                        emit_log(&app, "error", "conversation", format!("receive failed: {e}"));
+                        cancel_to_idle(&app);
+                        break;
+                    }
                     Err(_) => {
                         emit_log(&app, "error", "conversation", "async task dropped");
                         cancel_to_idle(&app);
@@ -533,8 +542,16 @@ fn run_conversation_loop(app: AppHandle) {
                     }
                 };
 
-                match audio {
-                    Ok(bytes) => {
+                // Forward the blendshape track to the webview (three.js VRM
+                // face). The track is NDJSON: one frame per line.
+                if let Some(track) = &blendshapes {
+                    if let Ok(text) = String::from_utf8(track.clone()) {
+                        let _ = app.emit("blendshapes", text);
+                    }
+                }
+
+                {
+                    let bytes = audio;
                         emit_log(
                             &app,
                             "info",
@@ -625,12 +642,6 @@ fn run_conversation_loop(app: AppHandle) {
                             // ResponseComplete -> Listening (warm). Loop back.
                         }
                     }
-                    Err(e) => {
-                        emit_log(&app, "error", "conversation", format!("receive failed: {e}"));
-                        cancel_to_idle(&app);
-                        break;
-                    }
-                }
             }
         }
     });

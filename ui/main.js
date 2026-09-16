@@ -123,6 +123,16 @@ async function init() {
     applyState(event.payload);
   });
 
+  // Blendshape track (avatar animation). The payload is NDJSON: one frame
+  // per line, each `{timecode_ms, weights:{...}}`. For now we count the
+  // frames and log them; the three.js VRM face consumes this in a later phase.
+  await listen("blendshapes", (event) => {
+    const track = event.payload || "";
+    const lines = track.split("\n").filter((l) => l.trim().length > 0);
+    console.log("[prosopon] blendshapes track:", lines.length, "frames");
+    addLog({ level: "info", source: "avatar", message: lines.length + " blendshape frames" });
+  });
+
   // Connect / disconnect toggle.
   connectBtn.addEventListener("click", () => {
     const connected = orb.dataset.state !== "disconnected";
