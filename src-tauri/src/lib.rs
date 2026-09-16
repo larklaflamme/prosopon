@@ -6,6 +6,7 @@
 
 mod state_machine;
 
+use prosopon_client_core::aec::{AecProcessor, ReferenceBuffer};
 use prosopon_client_core::mic_bus::MicBus;
 use prosopon_client_core::stt::{SttDetector, SttEvent};
 use prosopon_client_core::wake_word::WakeWordDetector;
@@ -355,14 +356,25 @@ fn run_conversation_loop(app: AppHandle) {
 
         // Phase 0: one shared mic bus for the whole session. The wake-word
         // and STT sidecars subscribe to it instead of opening their own mic.
-        let bus = match MicBus::start() {
+        // Acoustic echo cancellation (AEC) runs in the capture thread: the
+        // reference buffer is fed by playback, and AEC3 cancels the echo of
+        // the assistant's own voice from the mic.
+        let reference = Arc::new(ReferenceBuffer::new());
+        let aec = match AecProcessor::new(Arc::clone(&reference)) {
+            Ok(a) => Arc::new(a),
+            Err(e) => {
+                emit_log(&app, "error", "conversation", format!("AEC init failed: {e}"));
+                return;
+            }
+        };
+        let bus = match MicBus::start_with_aec(aec) {
             Ok(b) => b,
             Err(e) => {
                 emit_log(&app, "error", "conversation", format!("mic bus failed: {e}"));
                 return;
             }
         };
-        emit_log(&app, "info", "conversation", "mic bus open");
+        emit_log(&app, "info", "conversation", "mic bus open (AEC)");
 
         // Start the STT detector ONCE, warm, with the feed gate closed. It
         // stays alive for the whole session; the gate controls whether it
@@ -537,7 +549,7 @@ fn run_conversation_loop(app: AppHandle) {
                             }
                         }
                         // --- Play (interruptible for barge-in) ---
-                        let playback = match prosopon_client_core::playback::Playback::start(&bytes) {
+                        let playback = match prosopon_client_core::playback::Playback::start_with_reference(&bytes, Arc::clone(&reference)) {
                             Ok(p) => p,
                             Err(e) => {
                                 emit_log(&app, "error", "playback", format!("playback failed: {e}"));
@@ -583,6 +595,7 @@ fn run_conversation_loop(app: AppHandle) {
                                 Ok(()) => {
                                     emit_log(&app, "info", "conversation", "barge-in detected");
                                     playback.stop();
+                                    reference.clear();
                                     barged = true;
                                     break;
                                 }

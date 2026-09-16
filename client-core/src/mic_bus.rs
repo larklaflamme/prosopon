@@ -13,7 +13,12 @@
 //! *does* cross threads is the [`MicSubscription`] — a plain
 //! `mpsc::Receiver<Vec<f32>>`, which is `Send` — so subscribers can be
 //! created on any thread and consumed on any other thread.
+//!
+//! When an [`AecProcessor`] is supplied (via [`MicBus::start_with_aec`]), the
+//! capture thread runs each chunk through acoustic echo cancellation before
+//! fanning it out, so subscribers hear the echo-cancelled signal.
 
+use crate::aec::AecProcessor;
 use crate::mic::{Mic, MicError};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -63,6 +68,16 @@ impl MicBus {
     /// open (or fails), so a missing device / denied permission surfaces as
     /// an error here rather than silently.
     pub fn start() -> Result<Self, MicError> {
+        Self::start_inner(None)
+    }
+
+    /// Like [`MicBus::start`], but runs every captured chunk through the given
+    /// [`AecProcessor`] (acoustic echo cancellation) before fanning it out.
+    pub fn start_with_aec(aec: Arc<AecProcessor>) -> Result<Self, MicError> {
+        Self::start_inner(Some(aec))
+    }
+
+    fn start_inner(aec: Option<Arc<AecProcessor>>) -> Result<Self, MicError> {
         let subscribers: Arc<Mutex<Vec<mpsc::Sender<Vec<f32>>>>> =
             Arc::new(Mutex::new(Vec::new()));
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
@@ -87,7 +102,11 @@ impl MicBus {
                     break;
                 }
                 match mic.next_chunk() {
-                    Ok(chunk) => {
+                    Ok(mut chunk) => {
+                        // Run acoustic echo cancellation before fanning out.
+                        if let Some(aec) = &aec {
+                            aec.process_capture(&mut chunk);
+                        }
                         let mut subs = subs.lock().unwrap();
                         // Fan out a copy to every live subscriber; drop dead ones.
                         subs.retain(|tx| tx.send(chunk.clone()).is_ok());
