@@ -44,4 +44,6 @@ pub enum ClientError {
     ChannelClosed,
     #[error("invalid audio header: {0}")]
     InvalidAudioHeader(String),
+    #[error("invalid blendshapes header: {0}")]
+    InvalidBlendshapesHeader(String),
 }
