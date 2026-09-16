@@ -119,3 +119,12 @@ window.avatar = {
   get ready() { return ready; },
   get error() { return loadError; },
 };
+
+// Kick off rendering. Module scripts run after the DOM is parsed, so the
+// canvas exists here. This is what actually starts the renderer.
+const avatarCanvasEl = document.getElementById('avatar-canvas');
+if (avatarCanvasEl) {
+  init(avatarCanvasEl);
+} else {
+  console.error('[avatar] canvas #avatar-canvas not found');
+}
